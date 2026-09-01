@@ -1,0 +1,31 @@
+project: ORION
+
+audiences:
+  operator:
+    base_url: https://orion.example.test
+    audience: orion-operator-release-control
+
+actions:
+  strategy.release.read:
+    method: GET
+    path: /api/operator/releases
+    scope: strategy.release.read
+    audience: operator
+  strategy.release.import:
+    method: POST
+    path: /api/operator/releases/import
+    scope: strategy.release.import
+    audience: operator
+    content_type: application/json; charset=utf-8
+  strategy.release.approve:
+    method: POST
+    path: /api/operator/releases/{release_id}/decision
+    scope: strategy.release.approve
+    audience: operator
+    content_type: application/json; charset=utf-8
+  strategy.release.activate:
+    method: POST
+    path: /api/operator/releases/{release_id}/activate
+    scope: strategy.release.activate
+    audience: operator
+    content_type: application/json; charset=utf-8

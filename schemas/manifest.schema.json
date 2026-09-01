@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentctl.dev/schemas/manifest.schema.json",
+  "title": "agentctl project manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["project", "audiences", "actions"],
+  "properties": {
+    "project": {"type": "string", "minLength": 1},
+    "audiences": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["base_url", "audience"],
+        "properties": {
+          "base_url": {"type": "string", "format": "uri"},
+          "audience": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "actions": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["method", "path", "scope"],
+        "properties": {
+          "method": {"type": "string", "pattern": "^[A-Za-z]+$"},
+          "path": {"type": "string", "pattern": "^/"},
+          "scope": {"type": "string", "minLength": 1},
+          "audience": {"type": "string", "minLength": 1},
+          "content_type": {"type": "string"},
+          "resource": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

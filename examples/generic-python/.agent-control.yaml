@@ -1,0 +1,19 @@
+project: GENERIC_API
+
+audiences:
+  demo:
+    base_url: https://api.example.test
+    audience: demo-api
+
+actions:
+  records.read:
+    method: GET
+    path: /records
+    scope: records.read
+    audience: demo
+  records.create:
+    method: POST
+    path: /records
+    scope: records.create
+    audience: demo
+    content_type: application/json; charset=utf-8

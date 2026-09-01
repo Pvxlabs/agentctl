@@ -1,0 +1,26 @@
+{
+  "assertion": "agentctl-aav1.eyJhdWQiOiJ2ZWN0b3ItYXBpIiwiYm9keV9zaGEyNTYiOiJlOTg0MzBkNWZlZGQyZTYwZjM4NDliMGUwZDY1YTM2ZDZjMDg0MTBkOTgxZjgyYWZhM2QxMjA5ZDJkNDllOGVlIiwiY2Fub25pY2FsX3BhdGgiOiIvaXRlbXM_YT1vbmUmYj10d28mZW1wdHk9IiwiY29udGVudF90eXBlIjoiYXBwbGljYXRpb24vanNvbjsgY2hhcnNldD11dGYtOCIsImVudmlyb25tZW50IjoiZGV2ZWxvcG1lbnQiLCJleHAiOjE3MDAwMDAzMDAsImh0dHBfbWV0aG9kIjoiUE9TVCIsImlhdCI6MTcwMDAwMDAwMCwiaXNzIjoidmVjdG9yLWFnZW50IiwianRpIjoidmVjdG9yLWp0aS0wMDAxIiwia2V5X2Vwb2NoIjowLCJraWQiOiJ2ZWN0b3Ita2V5IiwibmJmIjoxNzAwMDAwMDAwLCJwcmluY2lwYWxfZXBvY2giOjAsInByb2plY3QiOiJhZ2VudGN0bC1jb25mb3JtYW5jZSIsInJlcXVlc3RfaWQiOiJyZXF1ZXN0LTAwMDEiLCJyZXNvdXJjZSI6Iml0ZW06MTIzIiwic2NvcGUiOiJpdGVtcy5yZWFkIiwic3ViIjoidmVjdG9yLWFnZW50IiwidmVyc2lvbiI6ImFnZW50LWFjdGlvbi1hc3NlcnRpb24vdjEifQ.rwOn7WnQHUzvXvFzEU6t1-SJ3RACgbHr4tqjjutGirnQaLSw51lXh7Xa2KeomrB0K6ewyqmvYQ3EQogmfSzWBA",
+  "audience": "vector-api",
+  "environment": "development",
+  "exp": 1700000300,
+  "iat": 1700000000,
+  "jti": "vector-jti-0001",
+  "key_id": "vector-key",
+  "nbf": 1700000000,
+  "principal_id": "vector-agent",
+  "private_seed_base64url": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "project": "agentctl-conformance",
+  "public_key_base64url": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+  "request": {
+    "body": "{\"z\":3,\"a\":1}\n",
+    "body_sha256": "e98430d5fedd2e60f3849b0e0d65a36d6c08410d981f82afa3d1209d2d49e8ee",
+    "canonical_path": "/items?a=one&b=two&empty=",
+    "content_type": "application/json; charset=utf-8",
+    "method": "POST",
+    "request_id": "request-0001",
+    "resource": "item:123",
+    "target": "https://vector.example.test/items?b=two&a=one&empty"
+  },
+  "request_id": "request-0001",
+  "scope": "items.read"
+}

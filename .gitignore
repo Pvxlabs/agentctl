@@ -1,0 +1,15 @@
+.venv/
+build/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.agentctl/
+typescript/node_modules/
+typescript/dist/
+typescript/dist/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.egg-info/
+work/
+.DS_Store

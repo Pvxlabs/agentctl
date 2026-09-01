@@ -1,0 +1,13 @@
+project: TERMINAL
+
+audiences:
+  control:
+    base_url: https://terminal.example.test
+    audience: terminal-machine-control
+
+actions:
+  control.read:
+    method: GET
+    path: /api/machine-control/state
+    scope: machine.control.read
+    audience: control
