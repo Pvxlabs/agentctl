@@ -69,8 +69,18 @@ as proof. A raw `100.x.x.x` address is not sufficient for Tailscale.
 
 The localhost verifier requires a loopback socket peer. The Tailscale verifier
 requires an address in `100.64.0.0/10` or `fd7a:115c:a1e0::/48` plus a
-server-side peer resolver. The resolver should use the Tailscale LocalAPI or
-an equivalent authenticated source and return a stable peer identity.
+server-side peer resolver. The Python provider
+`TailscaleLocalAPITransportVerifier` uses the local
+`/run/tailscale/tailscaled.sock` endpoint by default and calls
+`/localapi/v0/whois?addr=<server-observed-peer>`. It requires the returned
+`Node.Addresses` to contain the observed peer and emits `node:<StableID>` as
+the generic peer identity. LocalAPI errors, unknown peers, malformed responses,
+or address mismatches fail closed with `UNTRUSTED_TRANSPORT`.
+
+The socket path and LocalAPI result are server-owned. An application must never
+take the peer address, resolver result, or transport selection from a client
+header. `TAILSCALE_SOCKET_PEER_INVARIANT` is the implementation invariant for
+this binding: address-range membership alone never authorizes a request.
 
 ## Security invariant
 

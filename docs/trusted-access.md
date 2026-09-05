@@ -77,14 +77,26 @@ SDK with the existing registry/replay components and an application adapter:
 from agentctl.application import DeclarativeMappingAdapter, TrustedAccessSDK
 from agentctl.integrations.fastapi import create_fastapi_dependency
 from agentctl.replay import SQLiteReplayStore
-from agentctl.trusted import LocalhostTransportVerifier, TrustedIdentityVerifier
+from agentctl.trusted import (
+    LocalhostTransportVerifier,
+    TAILSCALE_LOCALAPI_SOCKET,
+    TailscaleLocalAPIClient,
+    TailscaleLocalAPITransportVerifier,
+    TrustedIdentityVerifier,
+)
+
+transport_verifiers = {"localhost": LocalhostTransportVerifier()}
+if "tailscale" in manifest.trusted_access.transports:
+    transport_verifiers["tailscale"] = TailscaleLocalAPITransportVerifier(
+        TailscaleLocalAPIClient(TAILSCALE_LOCALAPI_SOCKET)
+    )
 
 verifier = TrustedIdentityVerifier(
     registry,
     manifest.trusted_access,
     SQLiteReplayStore(".agentctl/trusted-replay.sqlite"),
     expected_audience="example-app-dev",
-    transport_verifiers={"localhost": LocalhostTransportVerifier()},
+    transport_verifiers=transport_verifiers,
 )
 sdk = TrustedAccessSDK(
     verifier,
@@ -156,8 +168,8 @@ forwarding header, or Tailscale identity.
 
 For a remote Tailscale browser or agent, the application or a separately
 controlled DEV authority must issue the assertion after verifying the actual
-server-side peer. The issuer must not expose an unrestricted endpoint such as
-`/issue?principal=admin`.
+server-side peer with `TailscaleLocalAPITransportVerifier`. The issuer must not
+expose an unrestricted endpoint such as `/issue?principal=admin`.
 
 ## Three identity paths
 
@@ -218,9 +230,13 @@ authorization semantics. They do not need to be forced through agentctl.
 - `examples/trusted-access-fastapi/` is a runnable FastAPI integration.
 - `examples/trusted-access-express/` is a runnable TypeScript/Express integration.
 
-Both use application-owned mappings and normal scope checks. Their Tailscale
-resolver is a server-owned configuration stand-in; replace it with a Tailscale
-LocalAPI or equivalent authenticated resolver before adopting the pattern.
+The FastAPI example uses the Python LocalAPI provider directly. The TypeScript
+SDK keeps its existing synchronous verifier contract; its resolver callback is
+useful for tests or an already-authenticated server-side provider, but is not a
+production substitute for LocalAPI. A Node integration that needs live LocalAPI
+verification should put the async Unix-socket lookup at its request boundary
+and pass only the resulting server-owned peer identity into an async adapter;
+agentctl does not spawn a blocking subprocess or trust request headers.
 
 ## Remaining security boundary
 

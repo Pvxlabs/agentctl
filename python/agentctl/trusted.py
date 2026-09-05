@@ -9,12 +9,17 @@ continues enforcing its existing authorization rules.
 from __future__ import annotations
 
 import ipaddress
+import http.client
+import json
 import re
+import socket
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol
+from urllib.parse import urlencode
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -35,6 +40,13 @@ ATIP_WIRE_VERSION = TRUSTED_IDENTITY_VERSION
 MAX_TRUSTED_IDENTITY_TTL_SECONDS = 300
 DEV_ENVIRONMENTS = frozenset({"dev", "development"})
 KNOWN_TRANSPORTS = frozenset({"localhost", "tailscale"})
+TAILSCALE_SOCKET_PEER_INVARIANT = (
+    "Tailscale trust requires the server-observed socket peer address to be "
+    "resolved by the local tailscaled LocalAPI; address range membership alone "
+    "never authorizes a request."
+)
+TAILSCALE_LOCALAPI_RESOLVER = "tailscale-localapi/v0/whois"
+TAILSCALE_LOCALAPI_SOCKET = "/run/tailscale/tailscaled.sock"
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9._:-]{1,256}$")
 
 
@@ -245,6 +257,59 @@ class TransportEvidence:
     peer_identity: str | None = None
 
 
+@dataclass(frozen=True)
+class TailscalePeerIdentity:
+    """Normalized, provider-specific identity returned by Tailscale WhoIs.
+
+    Raw LocalAPI JSON is intentionally not part of the public SDK contract.
+    ``stable_id`` is the preferred node identity; ``node_id`` is retained for
+    diagnostics and qualification output. User and capability fields are
+    provider metadata and are never copied into the generic ATIP subject.
+    """
+
+    node_id: str
+    stable_id: str
+    node_name: str
+    user_id: str | None
+    login_name: str | None
+    tags: tuple[str, ...]
+    capabilities: tuple[str, ...]
+    resolver: str = TAILSCALE_LOCALAPI_RESOLVER
+
+    @property
+    def node_identity(self) -> str:
+        return f"node:{self.stable_id}"
+
+
+@dataclass(frozen=True)
+class TailscaleTransportEvidence(TransportEvidence):
+    """TransportEvidence with Tailscale-only peer metadata."""
+
+    tailscale_peer: TailscalePeerIdentity | None = None
+
+
+@dataclass(frozen=True)
+class TailscalePeerPolicy:
+    """Optional provider constraints evaluated after LocalAPI WhoIs."""
+
+    allowed_node_ids: frozenset[str] = frozenset()
+    allowed_user_ids: frozenset[str] = frozenset()
+    allowed_login_names: frozenset[str] = frozenset()
+    required_tags: frozenset[str] = frozenset()
+    required_capabilities: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        for field_name, values in (
+            ("allowed_node_ids", self.allowed_node_ids),
+            ("allowed_user_ids", self.allowed_user_ids),
+            ("allowed_login_names", self.allowed_login_names),
+            ("required_tags", self.required_tags),
+            ("required_capabilities", self.required_capabilities),
+        ):
+            if not isinstance(values, frozenset) or any(not isinstance(value, str) or not value.strip() for value in values):
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", f"Tailscale {field_name} must contain non-empty strings")
+
+
 class TrustedTransportVerifier(Protocol):
     transport: str
 
@@ -273,6 +338,206 @@ class LocalhostTransportVerifier:
         if not address.is_loopback:
             _fail("UNTRUSTED_TRANSPORT", "peer is not loopback")
         return TransportEvidence(self.transport, observation.peer_address)
+
+
+def _tailscale_address_in_networks(peer_address: str, networks: tuple[ipaddress._BaseNetwork, ...]) -> None:
+    try:
+        address = ipaddress.ip_address(peer_address)
+    except ValueError as exc:
+        _fail("UNTRUSTED_TRANSPORT", "peer address is invalid")
+        raise AssertionError from exc
+    if not any(address in network for network in networks):
+        _fail("UNTRUSTED_TRANSPORT", "peer is outside configured Tailscale networks")
+
+
+def _tailscale_address_matches(peer_address: str, node_address: str) -> bool:
+    try:
+        peer = ipaddress.ip_address(peer_address)
+        prefix = ipaddress.ip_interface(node_address).network
+    except ValueError:
+        return False
+    return peer in prefix
+
+
+def _required_text(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        _fail("UNTRUSTED_TRANSPORT", f"Tailscale LocalAPI response is missing {field}")
+    return value.strip()
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
+
+
+def _string_list(value: Any, field: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+        _fail("UNTRUSTED_TRANSPORT", f"Tailscale LocalAPI response field {field} is malformed")
+    return tuple(sorted(set(item.strip() for item in value)))
+
+
+def _normalize_tailscale_whois(payload: Any, peer_address: str) -> TailscalePeerIdentity:
+    if not isinstance(payload, Mapping):
+        _fail("UNTRUSTED_TRANSPORT", "Tailscale LocalAPI response is not an object")
+    node = payload.get("Node")
+    user = payload.get("UserProfile")
+    if not isinstance(node, Mapping):
+        _fail("UNTRUSTED_TRANSPORT", "Tailscale LocalAPI response has no Node object")
+    addresses = node.get("Addresses")
+    if not isinstance(addresses, list) or not addresses or any(not isinstance(item, str) for item in addresses):
+        _fail("UNTRUSTED_TRANSPORT", "Tailscale LocalAPI response has malformed node addresses")
+    if not any(_tailscale_address_matches(peer_address, item) for item in addresses):
+        _fail("UNTRUSTED_TRANSPORT", "Tailscale WhoIs identity does not contain the observed socket peer")
+
+    raw_node_id = node.get("ID")
+    if isinstance(raw_node_id, bool) or not isinstance(raw_node_id, (str, int)):
+        _fail("UNTRUSTED_TRANSPORT", "Tailscale LocalAPI response has no valid node ID")
+    node_id = str(raw_node_id).strip()
+    if not node_id:
+        _fail("UNTRUSTED_TRANSPORT", "Tailscale LocalAPI response has no valid node ID")
+    stable_id = _required_text(node.get("StableID") or node_id, "Node.StableID")
+    node_name = _required_text(node.get("Name") or node.get("ComputedName"), "Node.Name")
+
+    raw_user_id = node.get("User")
+    if isinstance(raw_user_id, bool) or (raw_user_id is not None and not isinstance(raw_user_id, (str, int))):
+        _fail("UNTRUSTED_TRANSPORT", "Tailscale LocalAPI response has malformed node user ID")
+    user_id = str(raw_user_id).strip() if raw_user_id is not None else None
+    if user_id == "":
+        user_id = None
+    login_name = None
+    if isinstance(user, Mapping):
+        login_name = _optional_text(user.get("LoginName"))
+        profile_id = user.get("ID")
+        if profile_id is not None and (isinstance(profile_id, bool) or not isinstance(profile_id, (str, int))):
+            _fail("UNTRUSTED_TRANSPORT", "Tailscale LocalAPI response has malformed user profile ID")
+        if user_id is None and profile_id is not None:
+            user_id = str(profile_id).strip() or None
+    elif user is not None:
+        _fail("UNTRUSTED_TRANSPORT", "Tailscale LocalAPI response has malformed UserProfile")
+
+    tags = _string_list(node.get("Tags"), "Node.Tags")
+    capabilities = set(_string_list(node.get("Capabilities"), "Node.Capabilities"))
+    cap_map = node.get("CapMap")
+    if cap_map is not None:
+        if not isinstance(cap_map, Mapping) or any(not isinstance(key, str) or not key.strip() for key in cap_map):
+            _fail("UNTRUSTED_TRANSPORT", "Tailscale LocalAPI response field Node.CapMap is malformed")
+        capabilities.update(key.strip() for key in cap_map)
+    return TailscalePeerIdentity(
+        node_id=node_id,
+        stable_id=stable_id,
+        node_name=node_name,
+        user_id=user_id,
+        login_name=login_name,
+        tags=tags,
+        capabilities=tuple(sorted(capabilities)),
+    )
+
+
+class TailscaleLocalAPIClient:
+    """Small read-only client for the server's local tailscaled Unix socket."""
+
+    def __init__(self, socket_path: str | Path = TAILSCALE_LOCALAPI_SOCKET, *, timeout: float = 2.0, max_response_bytes: int = 1_048_576) -> None:
+        if timeout <= 0:
+            raise ValueError("Tailscale LocalAPI timeout must be positive")
+        if max_response_bytes <= 0:
+            raise ValueError("Tailscale LocalAPI response limit must be positive")
+        self.socket_path = str(socket_path)
+        self.timeout = timeout
+        self.max_response_bytes = max_response_bytes
+
+    def whois(self, peer_address: str) -> TailscalePeerIdentity:
+        try:
+            ipaddress.ip_address(peer_address)
+        except ValueError as exc:
+            _fail("UNTRUSTED_TRANSPORT", "Tailscale LocalAPI WhoIs requires an IP socket peer")
+            raise AssertionError from exc
+        path = "/localapi/v0/whois?" + urlencode({"addr": peer_address})
+        sock: socket.socket | None = None
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(self.timeout)
+            sock.connect(self.socket_path)
+            request = (
+                f"GET {path} HTTP/1.1\r\n"
+                "Host: local-tailscaled.sock\r\n"
+                "Connection: close\r\n"
+                "Accept: application/json\r\n\r\n"
+            ).encode("ascii")
+            sock.sendall(request)
+            response = http.client.HTTPResponse(sock)
+            response.begin()
+            body = response.read(self.max_response_bytes + 1)
+            status = response.status
+            response.close()
+        except (OSError, http.client.HTTPException) as exc:
+            _fail("UNTRUSTED_TRANSPORT", "Tailscale LocalAPI is unavailable")
+            raise AssertionError from exc
+        finally:
+            if sock is not None:
+                sock.close()
+        if len(body) > self.max_response_bytes:
+            _fail("UNTRUSTED_TRANSPORT", "Tailscale LocalAPI response is too large")
+        if status == 404:
+            _fail("UNTRUSTED_TRANSPORT", "Tailscale LocalAPI has no identity for the observed peer")
+        if status != 200:
+            _fail("UNTRUSTED_TRANSPORT", f"Tailscale LocalAPI WhoIs returned HTTP {status}")
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            _fail("UNTRUSTED_TRANSPORT", "Tailscale LocalAPI response is not valid JSON")
+            raise AssertionError from exc
+        return _normalize_tailscale_whois(payload, peer_address)
+
+
+def _check_tailscale_peer_policy(peer: TailscalePeerIdentity, policy: TailscalePeerPolicy) -> None:
+    if policy.allowed_node_ids and not ({peer.node_id, peer.stable_id} & policy.allowed_node_ids):
+        _fail("UNTRUSTED_TRANSPORT", "Tailscale node is not allowed by transport policy")
+    if policy.allowed_user_ids and (peer.user_id is None or peer.user_id not in policy.allowed_user_ids):
+        _fail("UNTRUSTED_TRANSPORT", "Tailscale user is not allowed by transport policy")
+    if policy.allowed_login_names and (peer.login_name is None or peer.login_name not in policy.allowed_login_names):
+        _fail("UNTRUSTED_TRANSPORT", "Tailscale login is not allowed by transport policy")
+    if not policy.required_tags.issubset(peer.tags):
+        _fail("UNTRUSTED_TRANSPORT", "Tailscale node is missing a required tag")
+    if not policy.required_capabilities.issubset(peer.capabilities):
+        _fail("UNTRUSTED_TRANSPORT", "Tailscale node is missing a required capability")
+
+
+class TailscaleLocalAPITransportVerifier:
+    """Verifies a Tailscale socket peer with LocalAPI WhoIs."""
+
+    transport = "tailscale"
+
+    def __init__(
+        self,
+        client: TailscaleLocalAPIClient,
+        *,
+        networks: tuple[str, ...] = ("100.64.0.0/10", "fd7a:115c:a1e0::/48"),
+        peer_policy: TailscalePeerPolicy | None = None,
+    ) -> None:
+        self.client = client
+        self.networks = tuple(ipaddress.ip_network(network) for network in networks)
+        self.peer_policy = peer_policy or TailscalePeerPolicy()
+
+    def verify(self, observation: TransportObservation) -> TailscaleTransportEvidence:
+        if observation.transport != self.transport or observation.forwarded_headers_present:
+            _fail("UNTRUSTED_TRANSPORT", "Tailscale proof cannot use forwarding headers")
+        if not observation.peer_address:
+            _fail("UNTRUSTED_TRANSPORT", "server did not provide a peer address")
+        _tailscale_address_in_networks(observation.peer_address, self.networks)
+        try:
+            peer = self.client.whois(observation.peer_address)
+        except TrustedAccessError:
+            raise
+        except Exception as exc:
+            _fail("UNTRUSTED_TRANSPORT", "Tailscale peer identity could not be verified")
+            raise AssertionError from exc
+        _check_tailscale_peer_policy(peer, self.peer_policy)
+        return TailscaleTransportEvidence(self.transport, observation.peer_address, peer.node_identity, peer)
 
 
 class TailscalePeerResolver(Protocol):

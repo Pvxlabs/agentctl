@@ -34,15 +34,15 @@ do not publish an unrestricted endpoint that accepts `principal=admin`.
 ## Tailscale
 
 Set `AGENTCTL_TRANSPORT=tailscale` only when the server is actually reached via
-Tailscale. The demo resolver reads a server-owned JSON map from
-`AGENTCTL_TAILSCALE_PEERS_JSON`, for example:
+Tailscale. The reference app uses the server's Tailscale LocalAPI Unix socket.
+Override the socket path only when the host uses a non-default location:
 
 ```bash
-AGENTCTL_TAILSCALE_PEERS_JSON='{"100.90.1.2":"node:dev-laptop"}' \
+TAILSCALE_SOCKET=/run/tailscale/tailscaled.sock \
 AGENTCTL_TRANSPORT=tailscale \
 /tmp/agentctl-fastapi-venv/bin/python examples/trusted-access-fastapi/app.py
 ```
 
-This map is only a runnable stand-in. Production deployments must replace it
-with a server-side Tailscale LocalAPI or equivalent authenticated peer resolver.
-Forwarded headers and a bare `100.x.x.x` address are rejected.
+The verifier queries WhoIs using the server-observed socket peer and checks that
+the response contains that address. LocalAPI failure, unknown peers, forwarded
+headers, and a bare `100.x.x.x` address are rejected.

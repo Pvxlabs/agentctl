@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import socket
+import stat
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -24,6 +27,7 @@ from .registry import Registry, encode_public_key, load_registry, save_registry
 from .replay import SQLiteReplayStore
 from .trusted import (
     LocalhostTransportVerifier,
+    TAILSCALE_LOCALAPI_SOCKET,
     TransportObservation,
     TrustedAccessAuthority,
     TrustedAccessConfig,
@@ -372,6 +376,23 @@ def _doctor_check(name: str, status: str, message: str) -> dict[str, str]:
     return {"name": name, "status": status, "message": message}
 
 
+def _tailscale_localapi_check(socket_path: str) -> tuple[str, str]:
+    """Check the configured LocalAPI endpoint without trusting request data."""
+
+    path = Path(socket_path)
+    if not path.exists():
+        return "FAIL", f"LocalAPI socket does not exist: {path}"
+    try:
+        if not stat.S_ISSOCK(path.stat().st_mode):
+            return "FAIL", f"LocalAPI path is not a Unix socket: {path}"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(1.0)
+            client.connect(str(path))
+    except OSError as exc:
+        return "FAIL", f"LocalAPI socket is not reachable: {exc}"
+    return "PASS", f"reachable LocalAPI socket: {path}"
+
+
 def _cmd_trusted_access_doctor(args: argparse.Namespace) -> int:
     manifest = load_manifest(args.manifest or find_manifest())
     config = manifest.trusted_access
@@ -391,8 +412,12 @@ def _cmd_trusted_access_doctor(args: argparse.Namespace) -> int:
     except (OSError, ValueError) as exc:
         checks.append(_doctor_check("authority", "FAIL", str(exc)))
     provider_ok = bool(config.transports) and all(item in {"localhost", "tailscale"} for item in config.transports)
-    provider_message = "server-side resolver required for tailscale" if "tailscale" in config.transports else "localhost socket peer verification configured"
+    provider_message = "server-side Tailscale LocalAPI verifier required" if "tailscale" in config.transports else "localhost socket peer verification configured"
     checks.append(_doctor_check("transport_provider", "PASS" if provider_ok else "FAIL", provider_message))
+    if "tailscale" in config.transports:
+        tailscale_socket = args.tailscale_socket or os.environ.get("TAILSCALE_SOCKET", TAILSCALE_LOCALAPI_SOCKET)
+        socket_status, socket_message = _tailscale_localapi_check(tailscale_socket)
+        checks.append(_doctor_check("tailscale_localapi", socket_status, socket_message))
     audiences = {item.audience for item in manifest.audiences.values()}
     selected_audience = config.application.audience if config.application else next(iter(audiences), None)
     audience_ok = selected_audience in audiences
@@ -644,6 +669,7 @@ def _parser() -> argparse.ArgumentParser:
     trusted_access_doctor.add_argument("--manifest")
     trusted_access_doctor.add_argument("--identity-file")
     trusted_access_doctor.add_argument("--registry-file")
+    trusted_access_doctor.add_argument("--tailscale-socket")
     trusted_access_issue = trusted_access_sub.add_parser("issue")
     trusted_access_issue.add_argument("--manifest")
     trusted_access_issue.add_argument("--identity-file", required=True)

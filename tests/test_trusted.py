@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import json
+import socket
+import threading
+from pathlib import Path
+
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -10,6 +15,9 @@ from agentctl.registry import Registry, encode_public_key
 from agentctl.replay import MemoryReplayStore
 from agentctl.trusted import (
     LocalhostTransportVerifier,
+    TailscaleLocalAPIClient,
+    TailscaleLocalAPITransportVerifier,
+    TailscalePeerPolicy,
     TailscaleTransportVerifier,
     TransportObservation,
     TrustedAccessAuthority,
@@ -18,6 +26,47 @@ from agentctl.trusted import (
     TrustedIdentityVerifier,
     establish_application_principal,
 )
+
+
+def _localapi_server(tmp_path: Path, payload: object, *, status: int = 200) -> tuple[Path, threading.Thread]:
+    socket_path = tmp_path / "tailscaled.sock"
+    ready = threading.Event()
+
+    def serve() -> None:
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(socket_path))
+        server.listen(1)
+        ready.set()
+        connection, _ = server.accept()
+        with connection:
+            connection.recv(4096)
+            body = json.dumps(payload).encode("utf-8")
+            connection.sendall(
+                f"HTTP/1.1 {status} test\r\nContent-Length: {len(body)}\r\n"
+                "Content-Type: application/json\r\nConnection: close\r\n\r\n".encode("ascii") + body
+            )
+        server.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    assert ready.wait(1)
+    return socket_path, thread
+
+
+def _whois_payload(peer: str = "100.90.1.2") -> dict[str, object]:
+    return {
+        "Node": {
+            "ID": 123,
+            "StableID": "node-stable-123",
+            "Name": "dev-host.example.ts.net.",
+            "User": 456,
+            "Addresses": [f"{peer}/32"],
+            "Tags": ["tag:dev"],
+            "Capabilities": ["cap:test"],
+            "CapMap": {"cap:read": []},
+        },
+        "UserProfile": {"ID": 456, "LoginName": "developer@example.test"},
+    }
 
 
 def setup() -> tuple[LocalIdentity, Registry, TrustedAccessConfig]:
@@ -274,3 +323,64 @@ def test_tailscale_accepts_configured_ipv4_and_ipv6_ranges_only() -> None:
         verifier.verify(TransportObservation("tailscale", "100.63.1.2"))
     with pytest.raises(TrustedAccessError):
         verifier.verify(TransportObservation("tailscale", "fd7a:115c:a1e1::42"))
+
+
+def test_tailscale_localapi_provider_uses_socket_peer_and_normalizes_identity(tmp_path: Path) -> None:
+    socket_path, thread = _localapi_server(tmp_path, _whois_payload())
+    client = TailscaleLocalAPIClient(socket_path)
+    evidence = TailscaleLocalAPITransportVerifier(
+        client,
+        peer_policy=TailscalePeerPolicy(
+            allowed_node_ids=frozenset({"node-stable-123"}),
+            allowed_user_ids=frozenset({"456"}),
+            allowed_login_names=frozenset({"developer@example.test"}),
+            required_tags=frozenset({"tag:dev"}),
+            required_capabilities=frozenset({"cap:test", "cap:read"}),
+        ),
+    ).verify(TransportObservation("tailscale", "100.90.1.2"))
+    thread.join(1)
+    assert evidence.peer_identity == "node:node-stable-123"
+    assert evidence.tailscale_peer is not None
+    assert evidence.tailscale_peer.node_id == "123"
+    assert evidence.tailscale_peer.login_name == "developer@example.test"
+    assert evidence.tailscale_peer.tags == ("tag:dev",)
+    assert evidence.tailscale_peer.capabilities == ("cap:read", "cap:test")
+
+
+@pytest.mark.parametrize(
+    "payload,status,peer,expected",
+    [
+        ({"Node": {"ID": 123, "StableID": "node-stable-123", "Name": "host", "Addresses": ["100.90.1.3/32"]}}, 200, "100.90.1.2", "UNTRUSTED_TRANSPORT"),
+        ({"Node": {"ID": 123, "StableID": "node-stable-123", "Name": "host", "Addresses": ["100.90.1.2/32"]}}, 404, "100.90.1.2", "UNTRUSTED_TRANSPORT"),
+        ({"malformed": True}, 200, "100.90.1.2", "UNTRUSTED_TRANSPORT"),
+    ],
+)
+def test_tailscale_localapi_provider_fails_closed_for_unknown_or_malformed_peer(
+    tmp_path: Path, payload: object, status: int, peer: str, expected: str
+) -> None:
+    socket_path, thread = _localapi_server(tmp_path, payload, status=status)
+    with pytest.raises(TrustedAccessError) as raised:
+        TailscaleLocalAPITransportVerifier(TailscaleLocalAPIClient(socket_path)).verify(
+            TransportObservation("tailscale", peer)
+        )
+    thread.join(1)
+    assert raised.value.code == expected
+
+
+def test_tailscale_localapi_provider_rejects_forwarded_headers_and_unavailable_socket(tmp_path: Path) -> None:
+    client = TailscaleLocalAPIClient(tmp_path / "missing.sock")
+    verifier = TailscaleLocalAPITransportVerifier(client)
+    with pytest.raises(TrustedAccessError) as raised:
+        verifier.verify(TransportObservation("tailscale", "100.90.1.2", forwarded_headers_present=True))
+    assert raised.value.code == "UNTRUSTED_TRANSPORT"
+    with pytest.raises(TrustedAccessError) as raised:
+        verifier.verify(TransportObservation("tailscale", "100.90.1.2"))
+    assert raised.value.code == "UNTRUSTED_TRANSPORT"
+
+
+def test_tailscale_localapi_provider_never_authorizes_ip_only(tmp_path: Path) -> None:
+    socket_path, thread = _localapi_server(tmp_path, _whois_payload())
+    client = TailscaleLocalAPIClient(socket_path)
+    with pytest.raises(TrustedAccessError):
+        TailscaleLocalAPITransportVerifier(client).verify(TransportObservation("tailscale", "100.90.1.3"))
+    thread.join(1)

@@ -37,7 +37,8 @@ authority path; do not expose an unrestricted `principal=admin` endpoint.
 ## Tailscale
 
 Set `AGENTCTL_TRANSPORT=tailscale` only for a server reached over Tailscale.
-The demo resolver reads a server-owned map:
+This example injects a deterministic server-side resolver map so it can run
+without a Node LocalAPI dependency:
 
 ```bash
 AGENTCTL_TAILSCALE_PEERS_JSON='{"100.90.1.2":"node:dev-laptop"}' \
@@ -45,6 +46,8 @@ AGENTCTL_TRANSPORT=tailscale \
 pnpm start
 ```
 
-Replace that resolver with a Tailscale LocalAPI or equivalent authenticated
-server-side peer lookup. Forwarding headers and a bare `100.x.x.x` address are
-not accepted as proof.
+The resolver callback is a test/example seam, not proof supplied by the
+client. A production Node deployment must perform the Tailscale LocalAPI (or
+equivalent authenticated server-side lookup) before passing the observed peer
+identity to the SDK. Forwarding headers and a bare `100.x.x.x` address are not
+accepted as proof.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from pathlib import Path
 
 from agentctl.cli import main
@@ -85,3 +86,39 @@ def test_trusted_access_issue_rejects_production_manifest(tmp_path: Path, capsys
         "--now", "1700000000",
     ]) == 2
     assert json.loads(capsys.readouterr().out)["result_code"] == "TRUSTED_ACCESS_NOT_DEV"
+
+
+def test_trusted_access_doctor_requires_reachable_tailscale_localapi(tmp_path: Path, capsys) -> None:
+    manifest, identity, registry = _init_project(tmp_path, capsys)
+    socket_path = tmp_path / "tailscaled.sock"
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(socket_path))
+    server.listen(1)
+    try:
+        assert main([
+            "trusted-access", "doctor",
+            "--manifest", str(manifest),
+            "--identity-file", str(identity),
+            "--registry-file", str(registry),
+            "--tailscale-socket", str(socket_path),
+        ]) == 0
+        output = json.loads(capsys.readouterr().out)
+        checks = {check["name"]: check for check in output["checks"]}
+        assert checks["tailscale_localapi"]["status"] == "PASS"
+    finally:
+        server.close()
+
+
+def test_trusted_access_doctor_fails_when_tailscale_localapi_is_missing(tmp_path: Path, capsys) -> None:
+    manifest, identity, registry = _init_project(tmp_path, capsys)
+    missing = tmp_path / "missing-tailscaled.sock"
+    assert main([
+        "trusted-access", "doctor",
+        "--manifest", str(manifest),
+        "--identity-file", str(identity),
+        "--registry-file", str(registry),
+        "--tailscale-socket", str(missing),
+    ]) == 1
+    output = json.loads(capsys.readouterr().out)
+    checks = {check["name"]: check for check in output["checks"]}
+    assert checks["tailscale_localapi"]["status"] == "FAIL"

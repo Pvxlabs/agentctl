@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -16,7 +15,9 @@ from agentctl.registry import load_registry
 from agentctl.replay import SQLiteReplayStore
 from agentctl.trusted import (
     LocalhostTransportVerifier,
-    TailscaleTransportVerifier,
+    TAILSCALE_LOCALAPI_SOCKET,
+    TailscaleLocalAPIClient,
+    TailscaleLocalAPITransportVerifier,
     TrustedIdentityVerifier,
     TrustedAccessError,
 )
@@ -28,21 +29,6 @@ CONFIG = MANIFEST.trusted_access
 STATE = ROOT / ".agentctl"
 
 
-def _server_side_tailscale_resolver(peer_address: str) -> str | None:
-    """Demo resolver backed by deployment-provided server configuration.
-
-    Replace this function with a Tailscale LocalAPI call in a real deployment.
-    It never reads forwarding headers or trusts the peer address by itself.
-    """
-
-    raw = os.environ.get("AGENTCTL_TAILSCALE_PEERS_JSON", "{}")
-    try:
-        peers = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    return peers.get(peer_address) if isinstance(peers, dict) else None
-
-
 def _build_sdk() -> TrustedAccessSDK[MappedApplicationPrincipal]:
     if not CONFIG.enabled or CONFIG.application is None or CONFIG.adapter is None:
         raise RuntimeError("trusted access requires an explicit application and adapter configuration")
@@ -50,7 +36,8 @@ def _build_sdk() -> TrustedAccessSDK[MappedApplicationPrincipal]:
     if "localhost" in CONFIG.transports:
         verifiers["localhost"] = LocalhostTransportVerifier()
     if "tailscale" in CONFIG.transports:
-        verifiers["tailscale"] = TailscaleTransportVerifier(_server_side_tailscale_resolver)
+        socket_path = os.environ.get("TAILSCALE_SOCKET", TAILSCALE_LOCALAPI_SOCKET)
+        verifiers["tailscale"] = TailscaleLocalAPITransportVerifier(TailscaleLocalAPIClient(socket_path))
     verifier = TrustedIdentityVerifier(
         load_registry(STATE / "registry.json"),
         CONFIG,

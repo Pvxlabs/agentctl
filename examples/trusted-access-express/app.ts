@@ -45,6 +45,8 @@ const config: TrustedAccessConfig = {
 };
 
 const registry = JSON.parse(readFileSync(new URL("../.agentctl/registry.json", import.meta.url), "utf8")) as Registry;
+// Example-only resolver injection. Production Node integrations must resolve
+// the server-observed socket peer through Tailscale LocalAPI before the SDK.
 const peerMap = JSON.parse(process.env.AGENTCTL_TAILSCALE_PEERS_JSON ?? "{}") as Record<string, string>;
 const verifiers = {
   localhost: new LocalhostTransportVerifier(),
