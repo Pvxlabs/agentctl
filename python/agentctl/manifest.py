@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -14,7 +15,6 @@ import yaml
 from .trusted import TrustedAccessConfig, TrustedAccessError
 
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
-_ROOT = Path(__file__).resolve().parents[2]
 _FORBIDDEN_KEYS = {
     "private_key", "secret", "password", "cookie", "token", "credential", "database_password", "database_url",
 }
@@ -101,7 +101,8 @@ def render_action_path(path: str, params: dict[str, str]) -> str:
 def _schema() -> dict[str, Any]:
     import json
 
-    return json.loads((_ROOT / "schemas" / "manifest.schema.json").read_text(encoding="utf-8"))
+    schema = files("agentctl").joinpath("schemas", "manifest.schema.json")
+    return json.loads(schema.read_text(encoding="utf-8"))
 
 
 def _reject_sensitive_fields(value: Any, path: str = "manifest") -> None:
