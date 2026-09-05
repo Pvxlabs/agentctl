@@ -9,7 +9,7 @@ import {
   parseAssertion,
   sha256Hex,
 } from "./protocol.js";
-import { MemoryReplayStore, VerificationError, verifyAgentRequest, type Registry } from "./verifier.js";
+import { MemoryReplayStore, VerificationError, verifyAgentRequest, type AuditEvent, type Registry } from "./verifier.js";
 import { LocalhostTransportVerifier, TailscaleTransportVerifier, TrustedAccessAuthority, TrustedAccessError, TrustedIdentityVerifier, type TrustedAccessConfig } from "./trusted.js";
 
 const vector = JSON.parse(readFileSync(new URL("../../vectors/assertion-v1.json", import.meta.url), "utf8")) as {
@@ -119,6 +119,49 @@ test("TypeScript Trusted DEV identity establishes an application-neutral subject
   assert.throws(() => transport.verify({ transport: "localhost", peerAddress: "100.90.1.2" }), (error: unknown) => error instanceof TrustedAccessError && error.code === "UNTRUSTED_TRANSPORT");
 });
 
+test("TypeScript Trusted DEV decisions use the existing audit sink without leaking assertions", () => {
+  const config: TrustedAccessConfig = {
+    enabled: true,
+    environment: "development",
+    transports: ["localhost"],
+    principals: { agent: { subject: "dev-agent", principal_type: "agent", scopes: ["app:test"] } },
+  };
+  const transport = new LocalhostTransportVerifier();
+  const events: AuditEvent[] = [];
+  const auditSink = { append: (event: AuditEvent) => { events.push(event); } };
+  const authority = new TrustedAccessAuthority(privateKey, "vector-agent", "vector-key", registry, config, { localhost: transport }, auditSink);
+  const verifier = new TrustedIdentityVerifier(registry, config, new MemoryReplayStore(), "dev-api", { localhost: transport }, auditSink);
+  const observation = { transport: "localhost", peerAddress: "127.0.0.1" };
+  const assertion = authority.issue({ requestedPrincipal: "agent", audience: "dev-api", scopes: ["app:test"], observation, now: 1_700_000_000 });
+  verifier.verify(assertion, { observation, now: 1_700_000_001 });
+  assert.throws(() => verifier.verify(assertion, { observation, now: 1_700_000_001 }), (error: unknown) => error instanceof TrustedAccessError && error.code === "REPLAYED_JTI");
+  assert.throws(() => verifier.verify("malformed", { observation, now: 1_700_000_001 }), (error: unknown) => error instanceof TrustedAccessError && error.code === "MALFORMED_TRUSTED_ASSERTION");
+  assert.deepEqual(events.map((event) => [event.result, event.result_code, event.action]), [
+    ["AUTHORIZED", "TRUSTED_IDENTITY_ISSUED", "trusted_dev.issue"],
+    ["AUTHORIZED", "TRUSTED_IDENTITY_VERIFIED", "trusted_dev.verify"],
+    ["REJECTED", "REPLAYED_JTI", "trusted_dev.verify"],
+    ["REJECTED", "MALFORMED_TRUSTED_ASSERTION", "trusted_dev.verify"],
+  ]);
+  assert.ok(events.every((event) => event.principal_type === "trusted_dev"));
+  assert.ok(events.every((event) => !("private_key" in event) && !("assertion" in event)));
+});
+
+test("TypeScript Trusted DEV transport resolver failures are audited and fail closed", () => {
+  const config: TrustedAccessConfig = {
+    enabled: true,
+    environment: "development",
+    transports: ["tailscale"],
+    principals: { agent: { subject: "dev-agent", principal_type: "agent", scopes: ["app:test"] } },
+  };
+  const events: AuditEvent[] = [];
+  const auditSink = { append: (event: AuditEvent) => { events.push(event); } };
+  const transport = new TailscaleTransportVerifier(() => { throw new Error("resolver unavailable"); });
+  const authority = new TrustedAccessAuthority(privateKey, "vector-agent", "vector-key", registry, config, { tailscale: transport }, auditSink);
+  assert.throws(() => authority.issue({ requestedPrincipal: "agent", audience: "dev-api", scopes: ["app:test"], observation: { transport: "tailscale", peerAddress: "100.90.1.2" }, now: 1_700_000_000 }), (error: unknown) => error instanceof TrustedAccessError && error.code === "UNTRUSTED_TRANSPORT");
+  assert.equal(events.at(-1)?.result_code, "UNTRUSTED_TRANSPORT");
+  assert.equal(events.at(-1)?.result, "REJECTED");
+});
+
 test("TypeScript Trusted DEV identity rejects expiry, tampering, malformed keys, and production config", () => {
   const config: TrustedAccessConfig = {
     enabled: true,
@@ -142,9 +185,31 @@ test("TypeScript Trusted DEV identity rejects expiry, tampering, malformed keys,
   assert.throws(() => new TrustedIdentityVerifier(registry, { ...config, transports: ["localhost", "localhost"] }, new MemoryReplayStore(), "dev-api", { localhost: transport }), (error: unknown) => error instanceof TrustedAccessError && error.code === "INVALID_TRUSTED_ACCESS_CONFIGURATION");
 });
 
+test("TypeScript Trusted DEV identity enforces the configured application audience", () => {
+  const config: TrustedAccessConfig = {
+    enabled: true,
+    environment: "development",
+    transports: ["localhost"],
+    application: { identity: "example", audience: "dev-api" },
+    principals: { agent: { name: "agent", subject: "dev-agent", principal_type: "agent", scopes: ["app:test"] } },
+  };
+  const transport = new LocalhostTransportVerifier();
+  const authority = new TrustedAccessAuthority(privateKey, "vector-agent", "vector-key", registry, config, { localhost: transport });
+  assert.throws(() => authority.issue({ requestedPrincipal: "agent", audience: "other-api", scopes: ["app:test"], observation: { transport: "localhost", peerAddress: "127.0.0.1" }, now: 1_700_000_000 }), (error: unknown) => error instanceof TrustedAccessError && error.code === "WRONG_AUDIENCE");
+  assert.throws(() => new TrustedIdentityVerifier(registry, config, new MemoryReplayStore(), "other-api", { localhost: transport }), (error: unknown) => error instanceof TrustedAccessError && error.code === "INVALID_TRUSTED_ACCESS_CONFIGURATION");
+});
+
 test("TypeScript Tailscale resolver errors are untrusted transport", () => {
   const verifier = new (class extends TailscaleTransportVerifier {
     constructor() { super(() => { throw new Error("resolver unavailable"); }); }
   })();
   assert.throws(() => verifier.verify({ transport: "tailscale", peerAddress: "100.90.1.2" }), (error: unknown) => error instanceof TrustedAccessError && error.code === "UNTRUSTED_TRANSPORT");
+});
+
+test("TypeScript Tailscale transport matches the configured IPv4 and IPv6 ranges", () => {
+  const verifier = new TailscaleTransportVerifier((peer) => `node:${peer}`);
+  assert.equal(verifier.verify({ transport: "tailscale", peerAddress: "100.90.1.2" }).peerIdentity, "node:100.90.1.2");
+  assert.equal(verifier.verify({ transport: "tailscale", peerAddress: "fd7a:115c:a1e0::42" }).peerIdentity, "node:fd7a:115c:a1e0::42");
+  assert.throws(() => verifier.verify({ transport: "tailscale", peerAddress: "100.63.1.2" }), (error: unknown) => error instanceof TrustedAccessError && error.code === "UNTRUSTED_TRANSPORT");
+  assert.throws(() => verifier.verify({ transport: "tailscale", peerAddress: "fd7a:115c:a1e1::42" }), (error: unknown) => error instanceof TrustedAccessError && error.code === "UNTRUSTED_TRANSPORT");
 });

@@ -87,7 +87,8 @@ not implement a secret manager.
 - `typescript/`: independent TypeScript verifier and protocol implementation.
 - `schemas/`: JSON Schemas for assertions and project manifests.
 - `vectors/`: cross-language golden vectors.
-- `examples/`: generic middleware plus ORION and Terminal adapter contracts.
+- `examples/`: generic middleware, ORION/Terminal adapter contracts, and
+  runnable Trusted Access FastAPI/Express references.
 - `python/agentctl/trusted.py`: Trusted Development Access authority,
   transport proofs, signed identity assertions, and application adapter hook.
 - `skill/SKILL.md`: instructions for coding and deployment agents.
@@ -148,6 +149,15 @@ An enabled policy with a production environment, unknown transport, missing
 principal, ambiguous fields, or a missing server-side transport verifier fails
 closed. Existing AAV1 machine request authentication and production behavior
 are unchanged.
+
+The security invariant is explicit: Trusted DEV access requires an enabled DEV
+policy, server-verified transport, an allowed application-neutral principal and
+allowed scopes, an integrity-protected assertion, normal application
+authorization, auditable decisions, and consume-once replay protection. Missing
+or ambiguous configuration fails closed. See
+[docs/trusted-access-protocol.md](docs/trusted-access-protocol.md) for the
+verification order and [docs/trusted-access.md](docs/trusted-access.md) for
+the Human Browser, AI Agent, and Production Machine paths.
 
 ## Development
 

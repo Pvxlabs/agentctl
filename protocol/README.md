@@ -28,3 +28,6 @@ It carries an application-neutral subject, exact sorted scopes, DEV
 environment, audience, verified transport, authority key/epochs, and a
 consume-once JTI. It is intentionally not an AAV1 request assertion and does
 not contain application usernames or passwords.
+
+See [Trusted Access Protocol](../docs/trusted-access-protocol.md) for the
+ATIP-v1 payload, transport proof, verification order, and security invariant.

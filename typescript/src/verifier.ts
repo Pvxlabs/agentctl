@@ -74,7 +74,7 @@ export class MemoryReplayStore implements ReplayStore {
 
 export interface AuditEvent {
   event_id: string;
-  principal_type: "machine";
+  principal_type: "machine" | "trusted_dev";
   principal_id: string;
   key_id: string;
   environment: string;

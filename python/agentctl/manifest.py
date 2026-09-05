@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 import jsonschema
 import yaml
 
-from .trusted import TrustedAccessConfig
+from .trusted import TrustedAccessConfig, TrustedAccessError
 
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _ROOT = Path(__file__).resolve().parents[2]
@@ -144,5 +144,7 @@ def load_manifest(path: str | Path) -> ProjectManifest:
             for name, config in value["actions"].items()
         }
         return ProjectManifest(value["project"], audiences, actions, source, TrustedAccessConfig.from_mapping(value.get("trusted_access")))
+    except TrustedAccessError:
+        raise
     except (OSError, UnicodeError, yaml.YAMLError, jsonschema.ValidationError, TypeError, ValueError) as exc:
         raise ValueError(f"cannot load manifest {source}: {exc}") from exc

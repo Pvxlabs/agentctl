@@ -7,6 +7,10 @@ The CLI is intentionally a thin signer, verifier, and transport wrapper.
 - `capabilities` lists actions from `.agent-control.yaml`.
 - `trusted-access validate` validates and prints the optional DEV trusted-access
   policy; it never mints an assertion from caller-supplied IP/header values.
+- `trusted-access issue` issues a short-lived localhost DEV identity assertion
+  from a local DEV authority. It is intended for a local agent or test runner;
+  remote Tailscale issuance belongs to an application-controlled authority
+  endpoint with a server-side peer resolver.
 - `sign` creates one assertion for one exact method, target, body, and request ID.
 - `call` resolves one manifest action, signs it, calls its canonical API, and
   reports transport outcome without interpreting business success.

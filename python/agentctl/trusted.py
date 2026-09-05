@@ -12,7 +12,7 @@ import ipaddress
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Protocol
 
@@ -27,6 +27,11 @@ from .replay import ReplayStore
 
 TRUSTED_IDENTITY_VERSION = "trusted-dev-identity/v1"
 TRUSTED_IDENTITY_PREFIX = "agentctl-tdi1"
+# Public protocol name/version.  The wire version above remains the stable
+# compatibility identifier for existing producers and verifiers.
+ATIP_PROTOCOL_NAME = "Agentctl Trusted Identity Protocol"
+ATIP_VERSION = "ATIP-v1"
+ATIP_WIRE_VERSION = TRUSTED_IDENTITY_VERSION
 MAX_TRUSTED_IDENTITY_TTL_SECONDS = 300
 DEV_ENVIRONMENTS = frozenset({"dev", "development"})
 KNOWN_TRANSPORTS = frozenset({"localhost", "tailscale"})
@@ -75,11 +80,46 @@ class TrustedPrincipalPolicy:
 
 
 @dataclass(frozen=True)
+class TrustedApplicationConfig:
+    """Optional application metadata declared by a project manifest."""
+
+    identity: str
+    audience: str | None = None
+
+    def __post_init__(self) -> None:
+        _identifier(self.identity, "trusted_access.application.identity")
+        if self.audience is not None:
+            _identifier(self.audience, "trusted_access.application.audience")
+
+
+@dataclass(frozen=True)
+class TrustedAdapterConfig:
+    """Manifest metadata for the application-owned adapter boundary."""
+
+    type: str
+    mappings: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.type not in {"declarative_mapping", "custom"}:
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "unsupported trusted access adapter type")
+        if not isinstance(self.mappings, Mapping):
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted adapter mappings must be an object")
+        for subject, application_identity in self.mappings.items():
+            _identifier(subject, "trusted adapter subject")
+            if not isinstance(application_identity, str) or not application_identity.strip() or application_identity != application_identity.strip():
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted adapter application identity must be a trimmed string")
+        if self.type == "declarative_mapping" and not self.mappings:
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "declarative mapping adapter requires mappings")
+
+
+@dataclass(frozen=True)
 class TrustedAccessConfig:
     enabled: bool = False
     environment: str | None = None
     transports: tuple[str, ...] = ()
     principals: Mapping[str, TrustedPrincipalPolicy] | None = None
+    application: TrustedApplicationConfig | None = None
+    adapter: TrustedAdapterConfig | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -88,24 +128,35 @@ class TrustedAccessConfig:
             _identifier(self.environment, "trusted_access.environment")
         if not isinstance(self.transports, tuple):
             _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted transports must be a tuple")
-        if not isinstance(self.principals, (Mapping, type(None))):
-            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted principals must be a mapping")
-        values = self.principals or {}
-        if not self.enabled:
-            return
-        if not self.environment or not is_dev_environment(self.environment):
-            _fail("TRUSTED_ACCESS_NOT_DEV", "trusted access can only be enabled for DEV")
-        if not self.transports or any(item not in KNOWN_TRANSPORTS for item in self.transports):
+        if any(not isinstance(item, str) or item not in KNOWN_TRANSPORTS for item in self.transports):
             _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted transports must be localhost or tailscale")
         if len(set(self.transports)) != len(self.transports):
             _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted transports must be unique")
-        if not values:
-            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "at least one trusted principal is required")
+        if not isinstance(self.principals, (Mapping, type(None))):
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted principals must be a mapping")
+        if self.application is not None and not isinstance(self.application, TrustedApplicationConfig):
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted application metadata is malformed")
+        if self.adapter is not None and not isinstance(self.adapter, TrustedAdapterConfig):
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted adapter metadata is malformed")
+        values = self.principals or {}
+        identities: set[tuple[str, str]] = set()
         for name, policy in values.items():
             if not isinstance(name, str) or not isinstance(policy, TrustedPrincipalPolicy):
                 _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted principal policy is malformed")
             if name != policy.name:
                 _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "principal policy name does not match its key")
+            identity = (policy.subject, policy.principal_type)
+            if identity in identities:
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted principal subject and type must be unique")
+            identities.add(identity)
+        if not self.enabled:
+            return
+        if not self.environment or not is_dev_environment(self.environment):
+            _fail("TRUSTED_ACCESS_NOT_DEV", "trusted access can only be enabled for DEV")
+        if not self.transports:
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted transports must be localhost or tailscale")
+        if not values:
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "at least one trusted principal is required")
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any] | None) -> "TrustedAccessConfig":
@@ -129,9 +180,11 @@ class TrustedAccessConfig:
         for name, raw in raw_principals.items():
             if not isinstance(name, str) or not isinstance(raw, Mapping):
                 _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted principal policy is malformed")
-            unknown_policy = set(raw) - {"subject", "scopes", "type", "principal_type"}
+            unknown_policy = set(raw) - {"name", "subject", "scopes", "type", "principal_type"}
             if unknown_policy:
                 _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", f"unknown trusted principal fields: {sorted(unknown_policy)}")
+            if "name" in raw and raw["name"] != name:
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", f"principal {name} name does not match its key")
             if "type" in raw and "principal_type" in raw and raw["type"] != raw["principal_type"]:
                 _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", f"principal {name} has ambiguous principal type")
             subject = raw.get("subject")
@@ -140,10 +193,31 @@ class TrustedAccessConfig:
                 _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", f"principal {name} scopes must be a list")
             principal_type = raw.get("principal_type", raw.get("type", "agent" if name == "agent" else "human"))
             principals[name] = TrustedPrincipalPolicy(name, subject, tuple(scopes), principal_type)
-        unknown = set(value) - {"enabled", "environment", "transports", "principals"}
+        raw_application = value.get("application")
+        application = None
+        if raw_application is not None:
+            if not isinstance(raw_application, Mapping):
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted_access.application must be an object")
+            unknown_application = set(raw_application) - {"identity", "audience"}
+            if unknown_application:
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", f"unknown trusted application fields: {sorted(unknown_application)}")
+            application = TrustedApplicationConfig(raw_application.get("identity"), raw_application.get("audience"))
+        raw_adapter = value.get("adapter")
+        adapter = None
+        if raw_adapter is not None:
+            if not isinstance(raw_adapter, Mapping):
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted_access.adapter must be an object")
+            unknown_adapter = set(raw_adapter) - {"type", "mappings"}
+            if unknown_adapter:
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", f"unknown trusted adapter fields: {sorted(unknown_adapter)}")
+            raw_mappings = raw_adapter.get("mappings", {})
+            if not isinstance(raw_mappings, Mapping):
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted adapter mappings must be an object")
+            adapter = TrustedAdapterConfig(raw_adapter.get("type", "custom"), dict(raw_mappings))
+        unknown = set(value) - {"enabled", "environment", "transports", "principals", "application", "adapter"}
         if unknown:
             _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", f"unknown trusted_access fields: {sorted(unknown)}")
-        return cls(enabled, environment, tuple(raw_transports), principals)
+        return cls(enabled, environment, tuple(raw_transports), principals, application, adapter)
 
     def policy_for(self, name: str) -> TrustedPrincipalPolicy:
         if not self.enabled:
@@ -171,11 +245,16 @@ class TransportEvidence:
     peer_identity: str | None = None
 
 
-class TransportVerifier(Protocol):
+class TrustedTransportVerifier(Protocol):
     transport: str
 
     def verify(self, observation: TransportObservation) -> TransportEvidence:
         ...
+
+
+# Compatibility alias retained for integrations built against the first
+# Trusted Development Access release.
+TransportVerifier = TrustedTransportVerifier
 
 
 class LocalhostTransportVerifier:
@@ -245,6 +324,54 @@ class TrustedIdentityEvidence:
     iat: int
     exp: int
 
+    def to_principal(self) -> "AgentctlPrincipal":
+        return AgentctlPrincipal(
+            issuer=self.issuer,
+            subject=self.subject,
+            principal_type=self.principal_type,
+            scopes=self.scopes,
+            audience=self.audience,
+            environment=self.environment,
+            auth_method="trusted_dev",
+            transport=self.transport,
+            assertion_id=self.jti,
+        )
+
+
+@dataclass(frozen=True)
+class AgentctlPrincipal:
+    """Stable application-facing identity returned by the verifier SDK."""
+
+    issuer: str
+    subject: str
+    principal_type: str
+    scopes: tuple[str, ...]
+    audience: str
+    environment: str
+    auth_method: str
+    transport: str
+    assertion_id: str
+
+    def has_scope(self, scope: str) -> bool:
+        return scope in self.scopes
+
+    def require_scope(self, scope: str) -> None:
+        if scope not in self.scopes:
+            _fail("SCOPE_DENIED", "application scope is not granted to the trusted principal")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "issuer": self.issuer,
+            "subject": self.subject,
+            "principal_type": self.principal_type,
+            "scopes": list(self.scopes),
+            "audience": self.audience,
+            "environment": self.environment,
+            "auth_method": self.auth_method,
+            "transport": self.transport,
+            "assertion_id": self.assertion_id,
+        }
+
 
 def _b64(value: bytes) -> str:
     import base64
@@ -288,8 +415,6 @@ def _validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         _fail("TRUSTED_ASSERTION_TTL_EXCEEDED", "trusted identity assertion TTL is too long")
     if payload["principal_type"] not in {"human", "agent", "observer"}:
         _fail("MALFORMED_TRUSTED_ASSERTION", "unsupported principal type")
-    if payload["transport"] not in KNOWN_TRANSPORTS:
-        _fail("MALFORMED_TRUSTED_ASSERTION", "unsupported transport")
     if "peer_identity" in payload:
         _identifier(payload["peer_identity"], "peer_identity")
     return dict(payload)
@@ -378,7 +503,13 @@ class TrustedAccessAuthority:
             verifier = self.transport_verifiers.get(observation.transport)
             if verifier is None or verifier.transport != observation.transport:
                 _fail("TRANSPORT_VERIFIER_MISSING", "no server-side verifier is configured for transport")
-            evidence = verifier.verify(observation)
+            try:
+                evidence = verifier.verify(observation)
+            except TrustedAccessError:
+                raise
+            except Exception as exc:
+                _fail("UNTRUSTED_TRANSPORT", "trusted transport verification failed")
+                raise AssertionError from exc
             policy = self.config.policy_for(requested_principal)
             requested_scopes = tuple(scopes)
             if not requested_scopes or len(set(requested_scopes)) != len(requested_scopes):
@@ -388,6 +519,9 @@ class TrustedAccessAuthority:
             if any(scope not in policy.scopes for scope in requested_scopes):
                 _fail("SCOPE_DENIED", "requested scope is not allowed for the trusted principal")
             _identifier(audience, "audience")
+            configured_audience = self.config.application.audience if self.config.application else None
+            if configured_audience is not None and audience != configured_audience:
+                _fail("WRONG_AUDIENCE", "requested audience does not match trusted access application policy")
             created = int(time.time()) if now is None else now
             if isinstance(created, bool) or not isinstance(created, int) or created < 0 or isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or ttl_seconds <= 0 or ttl_seconds > MAX_TRUSTED_IDENTITY_TTL_SECONDS:
                 _fail("INVALID_TRUSTED_TIME_WINDOW", "invalid trusted assertion time or TTL")
@@ -441,6 +575,10 @@ class TrustedIdentityVerifier:
             _fail("TRUSTED_ACCESS_DISABLED", "trusted DEV access is not enabled")
         if not expected_audience or config.environment is None:
             _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted identity verifier requires audience and environment")
+        _identifier(expected_audience, "expected audience")
+        configured_audience = config.application.audience if config.application else None
+        if configured_audience is not None and expected_audience != configured_audience:
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "expected audience does not match trusted access application policy")
         self.registry = registry
         self.config = config
         self.replay_store = replay_store
@@ -467,7 +605,13 @@ class TrustedIdentityVerifier:
             verifier = self.transport_verifiers.get(observation.transport)
             if verifier is None or verifier.transport != observation.transport:
                 _fail("TRANSPORT_VERIFIER_MISSING", "no server-side verifier is configured for transport")
-            transport = verifier.verify(observation)
+            try:
+                transport = verifier.verify(observation)
+            except TrustedAccessError:
+                raise
+            except Exception as exc:
+                _fail("UNTRUSTED_TRANSPORT", "trusted transport verification failed")
+                raise AssertionError from exc
             if payload.get("peer_identity") is not None and payload["peer_identity"] != transport.peer_identity:
                 _fail("UNTRUSTED_TRANSPORT", "current Tailscale peer does not match assertion")
             key = self.registry.keys.get(payload["kid"])
@@ -504,6 +648,11 @@ class TrustedIdentityVerifier:
             code = "BAD_SIGNATURE" if exc.__class__.__name__ == "InvalidSignature" else "MALFORMED_TRUSTED_ASSERTION"
             _audit(self.audit_sink, result="REJECTED", code=code, payload=payload, action=action)
             _fail(code, "trusted identity assertion verification failed")
+
+    def verify_principal(self, assertion: str, *, observation: TransportObservation, now: int, action: str = "trusted_dev.verify") -> AgentctlPrincipal:
+        """Verify once and return the application-facing principal contract."""
+
+        return self.verify(assertion, observation=observation, now=now, action=action).to_principal()
 
 
 class ApplicationPrincipalResolver(Protocol):

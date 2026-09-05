@@ -12,13 +12,24 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+import yaml
+
 from .audit import AuditEvent, JsonlAuditSink, verify_audit_file
+from .conformance import run_conformance, run_smoke_test
 from .identity import create_identity, load_identity
 from .manifest import find_manifest, load_manifest
 from .models import KeyRecord, PrincipalRecord, RequestContext, ScopeGrant
 from .protocol import build_assertion, canonical_request_target, parse_assertion, sha256_hex
 from .registry import Registry, encode_public_key, load_registry, save_registry
 from .replay import SQLiteReplayStore
+from .trusted import (
+    LocalhostTransportVerifier,
+    TransportObservation,
+    TrustedAccessAuthority,
+    TrustedAccessConfig,
+    TrustedAccessError,
+    parse_trusted_identity_assertion,
+)
 from .verifier import VerificationError, Verifier
 
 
@@ -226,16 +237,231 @@ def _cmd_trusted_access(args: argparse.Namespace) -> int:
                 "enabled": config.enabled,
                 "environment": config.environment,
                 "transports": list(config.transports),
+                "application": config.application.__dict__ if config.application else None,
+                "adapter": {
+                    "type": config.adapter.type,
+                    "mappings": dict(config.adapter.mappings),
+                } if config.adapter else None,
                 "principals": {
                     name: {"subject": policy.subject, "type": policy.principal_type, "scopes": list(policy.scopes)}
                     for name, policy in (config.principals or {}).items()
                 },
             },
             "status": "ENABLED" if config.enabled else "DISABLED",
+            "protocol": "ATIP-v1",
+            "valid": True,
         },
         json_output=True,
     )
     return 0
+
+
+def _project_slug(path: Path) -> str:
+    value = "".join(character.lower() if character.isalnum() else "-" for character in path.name)
+    value = "-".join(part for part in value.split("-") if part)
+    return value or "trusted-app"
+
+
+def _detect_framework(root: Path) -> str:
+    package = root / "package.json"
+    if package.exists():
+        try:
+            value = json.loads(package.read_text(encoding="utf-8"))
+            dependencies = {**value.get("dependencies", {}), **value.get("devDependencies", {})}
+            if "express" in dependencies or (root / "tsconfig.json").exists():
+                return "express"
+        except (OSError, UnicodeError, json.JSONDecodeError, AttributeError):
+            pass
+    for candidate in (root / "pyproject.toml", root / "requirements.txt", root / "requirements-dev.txt"):
+        if candidate.exists():
+            try:
+                if "fastapi" in candidate.read_text(encoding="utf-8").lower():
+                    return "fastapi"
+            except (OSError, UnicodeError):
+                pass
+    return "fastapi" if list(root.glob("*.py")) else "express"
+
+
+def _cmd_trusted_access_init(args: argparse.Namespace) -> int:
+    root = Path(args.path or ".").resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    state = root / ".agentctl"
+    identity_path = state / "dev-authority.json"
+    registry_path = state / "registry.json"
+    identity_exists = identity_path.exists()
+    registry_exists = registry_path.exists()
+    if identity_exists != registry_exists:
+        raise ValueError(
+            "trusted access state is incomplete; both .agentctl/dev-authority.json "
+            "and .agentctl/registry.json must exist together"
+        )
+    manifest_path = root / ".agent-control.yaml"
+    if manifest_path.exists() and not args.force:
+        _emit({"result": "EXISTS", "manifest": str(manifest_path), "message": "manifest already exists; use --force to replace the scaffold"}, json_output=True)
+        return 0
+    framework = _detect_framework(root)
+    project = _project_slug(root)
+    port = 8000 if framework == "fastapi" else 3000
+    audience = f"{project}-dev"
+    manifest = {
+        "project": project,
+        "audiences": {"dev": {"base_url": f"http://127.0.0.1:{port}", "audience": audience}},
+        "actions": {"health.read": {"method": "GET", "path": "/", "scope": "app:read", "audience": "dev"}},
+        "trusted_access": {
+            "enabled": True,
+            "environment": "dev",
+            "transports": ["localhost", "tailscale"],
+            "application": {"identity": project, "audience": audience},
+            "adapter": {
+                "type": "declarative_mapping",
+                "mappings": {
+                    "dev-user": "app-dev-user",
+                    "dev-admin": "app-dev-admin",
+                    "dev-agent": "app-dev-agent",
+                },
+            },
+            "principals": {
+                "user": {"subject": "dev-user", "type": "human", "scopes": ["app:read"]},
+                "admin": {"subject": "dev-admin", "type": "human", "scopes": ["app:admin", "app:read"]},
+                "agent": {"subject": "dev-agent", "type": "agent", "scopes": ["app:read", "app:test"]},
+            },
+        },
+    }
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
+
+    created_state = False
+    if not identity_exists and not registry_exists:
+        identity = create_identity(identity_path, principal_id="dev-authority", display_name="DEV Authority", environment="dev", key_id="dev-authority-key")
+        registry = Registry()
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        registry.add_principal(PrincipalRecord(identity.principal_id, identity.display_name, identity.environment, created_at=now, updated_at=now))
+        registry.add_key(KeyRecord(identity.key_id, identity.principal_id, identity.algorithm, encode_public_key(identity.public_key_bytes)))
+        save_registry(registry_path, registry)
+        created_state = True
+    guide = state / "trusted-access.integration.md"
+    guide.parent.mkdir(parents=True, exist_ok=True)
+    guide.write_text(
+        """# agentctl Trusted Development Access
+
+Generated scaffold. The application must install the optional framework integration,
+construct a `TrustedAccessSDK` with its verifier and adapter, and keep normal application
+authorization after the adapter establishes the application principal.
+
+The generated `app-dev-*` mapping values are placeholders owned by the target
+application. Replace them with that application's normal DEV identities; agentctl
+core does not know or store application account names.
+
+```text
+agentctl trusted-access validate
+agentctl trusted-access doctor
+agentctl trusted-access test
+agentctl trusted-access conformance
+```
+
+Use the dedicated `Agentctl-Trusted <assertion>` authorization scheme. Do not accept
+forwarding headers as transport proof and do not put application credentials in the
+manifest. See `docs/trusted-access.md` for framework examples.
+""",
+        encoding="utf-8",
+    )
+    _emit({"result": "CREATED", "framework": framework, "manifest": str(manifest_path), "identity_file": str(identity_path), "registry_file": str(registry_path), "integration_guide": str(guide), "state_created": created_state}, json_output=True)
+    return 0
+
+
+def _doctor_check(name: str, status: str, message: str) -> dict[str, str]:
+    return {"name": name, "status": status, "message": message}
+
+
+def _cmd_trusted_access_doctor(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest or find_manifest())
+    config = manifest.trusted_access
+    checks: list[dict[str, str]] = []
+    if not config.enabled:
+        checks.append(_doctor_check("environment", "DISABLED", "trusted access is explicitly disabled"))
+        checks.append(_doctor_check("production_isolation", "PASS", "disabled policy cannot activate trusted DEV access"))
+        _emit({"protocol": "ATIP-v1", "overall": "DISABLED", "checks": checks}, json_output=True)
+        return 0
+    checks.append(_doctor_check("environment", "PASS" if config.environment in {"dev", "development"} else "FAIL", f"environment={config.environment}"))
+    identity_path = Path(args.identity_file or manifest.source.parent / ".agentctl/dev-authority.json")
+    registry_path = Path(args.registry_file or manifest.source.parent / ".agentctl/registry.json")
+    try:
+        identity, registry, principal, key = _identity_registry_context(str(identity_path), str(registry_path))
+        authority_ok = identity.environment in {"dev", "development"} and principal.environment == config.environment and key.algorithm == "Ed25519"
+        checks.append(_doctor_check("authority", "PASS" if authority_ok else "FAIL", f"identity={identity.principal_id}"))
+    except (OSError, ValueError) as exc:
+        checks.append(_doctor_check("authority", "FAIL", str(exc)))
+    provider_ok = bool(config.transports) and all(item in {"localhost", "tailscale"} for item in config.transports)
+    provider_message = "server-side resolver required for tailscale" if "tailscale" in config.transports else "localhost socket peer verification configured"
+    checks.append(_doctor_check("transport_provider", "PASS" if provider_ok else "FAIL", provider_message))
+    audiences = {item.audience for item in manifest.audiences.values()}
+    selected_audience = config.application.audience if config.application else next(iter(audiences), None)
+    audience_ok = selected_audience in audiences
+    checks.append(_doctor_check("audience", "PASS" if audience_ok else "FAIL", f"audience={selected_audience}"))
+    adapter_ok = config.adapter is not None and config.adapter.type in {"declarative_mapping", "custom"}
+    if adapter_ok and config.adapter and config.adapter.type == "declarative_mapping":
+        subjects = {item.subject for item in (config.principals or {}).values()}
+        adapter_ok = subjects.issubset(config.adapter.mappings)
+    checks.append(_doctor_check("application_adapter", "PASS" if adapter_ok else "FAIL", "explicit adapter and mappings are present" if adapter_ok else "adapter mapping is incomplete"))
+    scope_ok = all(policy.scopes for policy in (config.principals or {}).values())
+    checks.append(_doctor_check("scope_policy", "PASS" if scope_ok else "FAIL", "explicit scopes only"))
+    isolation_ok = config.environment in {"dev", "development"}
+    checks.append(_doctor_check("production_isolation", "PASS" if isolation_ok else "FAIL", "trusted DEV semantics are isolated from production"))
+    failed = [check for check in checks if check["status"] == "FAIL"]
+    _emit({"protocol": "ATIP-v1", "overall": "FAIL" if failed else "PASS", "checks": checks, "manifest": str(manifest.source)}, json_output=True)
+    return 1 if failed else 0
+
+
+def _cmd_trusted_access_test(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest or find_manifest())
+    try:
+        result = run_smoke_test(manifest)
+    except (TrustedAccessError, ValueError) as exc:
+        _emit({"result": "FAILED", "result_code": getattr(exc, "code", "CLI_ERROR"), "message": str(exc)}, json_output=True)
+        return 1
+    _emit(result, json_output=True)
+    return 0 if result.get("passed") else 1
+
+
+def _cmd_trusted_access_issue(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest or find_manifest())
+    config = manifest.trusted_access
+    identity, registry, _principal, _key = _identity_registry_context(args.identity_file, args.registry_file)
+    if config.application and config.application.audience:
+        default_audience = config.application.audience
+    elif len(manifest.audiences) == 1:
+        default_audience = next(iter(manifest.audiences.values())).audience
+    else:
+        raise ValueError("trusted access issue requires --audience when the manifest has multiple audiences")
+    authority = TrustedAccessAuthority(
+        identity,
+        registry,
+        config,
+        transport_verifiers={"localhost": LocalhostTransportVerifier()},
+    )
+    assertion = authority.issue(
+        requested_principal=args.principal,
+        audience=args.audience or default_audience,
+        scopes=args.scope,
+        observation=TransportObservation("localhost", "127.0.0.1"),
+        now=args.now,
+        ttl_seconds=args.ttl,
+    )
+    payload, _signature, _segment = parse_trusted_identity_assertion(assertion)
+    if args.out:
+        destination = Path(args.out)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(assertion + "\n", encoding="utf-8")
+        _emit({"assertion_file": str(destination.resolve()), "jti": payload["jti"], "subject": payload["sub"], "scopes": payload["scopes"], "expires_at": payload["exp"]}, json_output=True)
+    else:
+        _emit({"assertion": assertion, "jti": payload["jti"], "subject": payload["sub"], "scopes": payload["scopes"], "expires_at": payload["exp"]}, json_output=True)
+    return 0
+
+
+def _cmd_trusted_access_conformance(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest or find_manifest())
+    result = run_conformance(manifest)
+    _emit(result, json_output=True)
+    return 0 if result["compatible"] else 1
 
 
 def _cmd_sign(args: argparse.Namespace) -> int:
@@ -411,6 +637,25 @@ def _parser() -> argparse.ArgumentParser:
     trusted_access_sub = trusted_access.add_subparsers(dest="trusted_access_action", required=True)
     trusted_access_validate = trusted_access_sub.add_parser("validate")
     trusted_access_validate.add_argument("--manifest")
+    trusted_access_init = trusted_access_sub.add_parser("init")
+    trusted_access_init.add_argument("--path", default=".")
+    trusted_access_init.add_argument("--force", action="store_true")
+    trusted_access_doctor = trusted_access_sub.add_parser("doctor")
+    trusted_access_doctor.add_argument("--manifest")
+    trusted_access_doctor.add_argument("--identity-file")
+    trusted_access_doctor.add_argument("--registry-file")
+    trusted_access_issue = trusted_access_sub.add_parser("issue")
+    trusted_access_issue.add_argument("--manifest")
+    trusted_access_issue.add_argument("--identity-file", required=True)
+    trusted_access_issue.add_argument("--registry-file", required=True)
+    trusted_access_issue.add_argument("--principal", required=True)
+    trusted_access_issue.add_argument("--audience")
+    trusted_access_issue.add_argument("--scope", action="append", required=True)
+    trusted_access_issue.add_argument("--now", type=int)
+    trusted_access_issue.add_argument("--ttl", type=int, default=60)
+    trusted_access_issue.add_argument("--out")
+    trusted_access_sub.add_parser("test").add_argument("--manifest")
+    trusted_access_sub.add_parser("conformance").add_argument("--manifest")
 
     sign = subparsers.add_parser("sign")
     sign.add_argument("--identity-file", required=True)
@@ -488,6 +733,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "trusted-access":
             if args.trusted_access_action == "validate":
                 return _cmd_trusted_access(args)
+            if args.trusted_access_action == "init":
+                return _cmd_trusted_access_init(args)
+            if args.trusted_access_action == "doctor":
+                return _cmd_trusted_access_doctor(args)
+            if args.trusted_access_action == "issue":
+                return _cmd_trusted_access_issue(args)
+            if args.trusted_access_action == "test":
+                return _cmd_trusted_access_test(args)
+            if args.trusted_access_action == "conformance":
+                return _cmd_trusted_access_conformance(args)
             raise ValueError("trusted-access subcommand is required")
         if args.command == "sign":
             return _cmd_sign(args)
@@ -498,6 +753,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "audit":
             return _cmd_audit(args)
     except (OSError, ValueError, TypeError) as exc:
-        _emit({"result": "FAILED", "result_code": "CLI_ERROR", "message": str(exc)}, json_output=True)
+        _emit({"result": "FAILED", "result_code": getattr(exc, "code", "CLI_ERROR"), "message": str(exc)}, json_output=True)
         return 2
     return 2

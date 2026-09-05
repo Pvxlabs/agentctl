@@ -39,6 +39,11 @@
 | DEV-to-production confusion | Trusted policy accepts only exact `dev`/`development`; enabled production policy is rejected; verifier rechecks environment. |
 | Application account substitution | Core emits only application-neutral subjects; adapter owns mapping and normal application authorization remains required. |
 
+Trusted Access is not applied to every private DEV page. P620 Performance
+Console, DEV Portal, and similar observability/tooling pages may remain
+localhost/Tailscale-only when they do not carry identity, role, scope, or
+business authorization semantics.
+
 ## Residual risks
 
 - A compromised agent holding a currently valid private key can make actions
@@ -70,3 +75,6 @@
   DEV deployment?
 - Is the Tailscale peer resolver backed by a server-side LocalAPI or equivalent,
   rather than request headers or an IP allowlist alone?
+- Does the negative suite reject production enablement, missing or ambiguous
+  environment, unknown principals, scope escalation, invalid/expired/tampered
+  assertions, and spoofed forwarding headers?

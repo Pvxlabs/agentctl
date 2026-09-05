@@ -92,6 +92,9 @@ def test_trusted_access_disabled_and_missing_transport_verifier_fail_closed() ->
     with pytest.raises(TrustedAccessError) as raised:
         TrustedAccessAuthority(identity, registry, TrustedAccessConfig())
     assert raised.value.code == "TRUSTED_ACCESS_DISABLED"
+    with pytest.raises(TrustedAccessError) as raised:
+        TrustedAccessConfig.from_mapping({"enabled": False, "transports": ["proxy"]})
+    assert raised.value.code == "INVALID_TRUSTED_ACCESS_CONFIGURATION"
     config = TrustedAccessConfig.from_mapping({"enabled": True, "environment": "dev", "transports": ["localhost"], "principals": {"agent": {"subject": "dev-agent", "scopes": ["app:test"]}}})
     authority = TrustedAccessAuthority(identity, registry, config)
     with pytest.raises(TrustedAccessError) as raised:
@@ -142,6 +145,56 @@ def test_production_cannot_activate_trusted_dev_semantics() -> None:
     assert raised.value.code == "TRUSTED_ACCESS_NOT_DEV"
 
 
+def test_application_audience_is_enforced_at_issue_and_verifier_setup() -> None:
+    identity, registry, _ = setup()
+    config = TrustedAccessConfig.from_mapping({
+        "enabled": True,
+        "environment": "dev",
+        "transports": ["localhost"],
+        "application": {"identity": "example", "audience": "example-dev"},
+        "principals": {"agent": {"subject": "dev-agent", "type": "agent", "scopes": ["app:test"]}},
+    })
+    transport = LocalhostTransportVerifier()
+    authority = TrustedAccessAuthority(identity, registry, config, transport_verifiers={"localhost": transport})
+    with pytest.raises(TrustedAccessError) as raised:
+        authority.issue(
+            requested_principal="agent",
+            audience="other-dev",
+            scopes=["app:test"],
+            observation=TransportObservation("localhost", "127.0.0.1"),
+            now=1_700_000_000,
+        )
+    assert raised.value.code == "WRONG_AUDIENCE"
+    with pytest.raises(TrustedAccessError) as raised:
+        TrustedIdentityVerifier(
+            registry,
+            config,
+            MemoryReplayStore(),
+            expected_audience="other-dev",
+            transport_verifiers={"localhost": transport},
+        )
+    assert raised.value.code == "INVALID_TRUSTED_ACCESS_CONFIGURATION"
+
+
+def test_configuration_rejects_ambiguous_type_and_name_metadata() -> None:
+    with pytest.raises(TrustedAccessError) as raised:
+        TrustedAccessConfig.from_mapping({
+            "enabled": True,
+            "environment": "dev",
+            "transports": ["localhost"],
+            "principals": {"agent": {"name": "worker", "subject": "dev-agent", "type": "agent", "principal_type": "human", "scopes": ["app:test"]}},
+        })
+    assert raised.value.code == "INVALID_TRUSTED_ACCESS_CONFIGURATION"
+    with pytest.raises(TrustedAccessError) as raised:
+        TrustedAccessConfig.from_mapping({
+            "enabled": True,
+            "environment": "dev",
+            "transports": ["localhost"],
+            "principals": {"agent": {"name": "worker", "subject": "dev-agent", "scopes": ["app:test"]}},
+        })
+    assert raised.value.code == "INVALID_TRUSTED_ACCESS_CONFIGURATION"
+
+
 def test_trusted_identity_decisions_are_hash_chained_in_audit(tmp_path) -> None:
     identity, registry, config = setup()
     audit_path = tmp_path / "trusted-audit.jsonl"
@@ -170,3 +223,54 @@ def test_tailscale_resolver_errors_fail_closed() -> None:
     with pytest.raises(TrustedAccessError) as raised:
         TailscaleTransportVerifier(resolver).verify(TransportObservation("tailscale", "100.90.1.2"))
     assert raised.value.code == "UNTRUSTED_TRANSPORT"
+
+
+def test_custom_transport_verifier_errors_fail_closed() -> None:
+    identity, registry, config = setup()
+
+    class BrokenVerifier:
+        transport = "localhost"
+
+        def verify(self, _observation: TransportObservation) -> object:
+            raise RuntimeError("resolver unavailable")
+
+    authority = TrustedAccessAuthority(identity, registry, config, transport_verifiers={"localhost": BrokenVerifier()})
+    with pytest.raises(TrustedAccessError) as raised:
+        authority.issue(
+            requested_principal="agent",
+            audience="orion-dev",
+            scopes=["app:test"],
+            observation=TransportObservation("localhost", "127.0.0.1"),
+            now=1_700_000_000,
+        )
+    assert raised.value.code == "UNTRUSTED_TRANSPORT"
+
+    localhost = LocalhostTransportVerifier()
+    valid_authority = TrustedAccessAuthority(identity, registry, config, transport_verifiers={"localhost": localhost})
+    assertion = valid_authority.issue(
+        requested_principal="agent",
+        audience="orion-dev",
+        scopes=["app:test"],
+        observation=TransportObservation("localhost", "127.0.0.1"),
+        now=1_700_000_000,
+    )
+    verifier = TrustedIdentityVerifier(
+        registry,
+        config,
+        MemoryReplayStore(),
+        expected_audience="orion-dev",
+        transport_verifiers={"localhost": BrokenVerifier()},
+    )
+    with pytest.raises(TrustedAccessError) as raised:
+        verifier.verify(assertion, observation=TransportObservation("localhost", "127.0.0.1"), now=1_700_000_001)
+    assert raised.value.code == "UNTRUSTED_TRANSPORT"
+
+
+def test_tailscale_accepts_configured_ipv4_and_ipv6_ranges_only() -> None:
+    verifier = TailscaleTransportVerifier(lambda address: f"node:{address}")
+    assert verifier.verify(TransportObservation("tailscale", "100.90.1.2")).peer_identity == "node:100.90.1.2"
+    assert verifier.verify(TransportObservation("tailscale", "fd7a:115c:a1e0::42")).peer_identity == "node:fd7a:115c:a1e0::42"
+    with pytest.raises(TrustedAccessError):
+        verifier.verify(TransportObservation("tailscale", "100.63.1.2"))
+    with pytest.raises(TrustedAccessError):
+        verifier.verify(TransportObservation("tailscale", "fd7a:115c:a1e1::42"))

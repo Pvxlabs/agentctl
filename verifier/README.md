@@ -32,3 +32,7 @@ The verifier returns an application-neutral subject such as `dev-user` or
 to its ordinary authenticated principal and starts its normal session. The
 adapter must not skip application authorization or turn a trusted subject into
 an unrestricted administrator.
+
+See [Trusted Development Access](../docs/trusted-access.md) for the Python and
+TypeScript integration examples, local agent issuance workflow, three identity
+paths, and the `TRUSTED_DEV_ACCESS_INVARIANT` acceptance boundary.

@@ -288,7 +288,9 @@ bare `100.x` address is not a proof.
 The target application verifies the assertion, consumes its JTI, maps `sub` in
 an application-owned adapter, establishes its normal authenticated session,
 and continues ordinary role/scope/domain authorization. The assertion does not
-replace application authorization.
+replace application authorization. When `trusted_access.application.audience`
+is declared, both the authority and verifier require the exact same audience;
+there is no second audience choice hidden in an adapter.
 
 The invariant for this path is named `TRUSTED_DEV_ACCESS_INVARIANT`:
 
@@ -303,8 +305,11 @@ All four conditions are required. Missing, ambiguous, production, spoofed, or
 stale inputs deny by default.
 
 The CLI command `agentctl trusted-access validate` only validates and displays
-manifest policy. Assertion issuance is intentionally a server-side authority
-operation so a CLI cannot manufacture transport proof from user input.
+manifest policy. `agentctl trusted-access issue` is a local-only convenience
+for DEV agents and test runners: it uses a local DEV authority with a fixed
+loopback observation and never accepts a caller-supplied IP, forwarding header,
+or Tailscale identity. Remote Tailscale issuance remains an
+application-controlled authority path with server-side peer verification.
 
 ## 13. Definition of done
 
@@ -314,5 +319,9 @@ operation so a CLI cannot manufacture transport proof from user input.
 - Golden vectors and cross-language parity pass.
 - Generic, ORION, and Terminal adapter contracts exist without production code.
 - Security matrix and independent review are complete.
+- `TRUSTED_DEV_ACCESS_INVARIANT` negative cases fail closed, including
+  production configuration, untrusted transport, spoofed forwarding headers,
+  unknown principals, scope escalation, stale/expired/tampered assertions,
+  missing environment, and ambiguous configuration.
 - Commit status and push status are reported separately.
 - Production mutation is `NO`.

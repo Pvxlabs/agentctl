@@ -8,6 +8,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./integrations/express.js": {
+      "types": "./dist/integrations/express.d.ts",
+      "import": "./dist/integrations/express.js"
     }
   },
   "scripts": {

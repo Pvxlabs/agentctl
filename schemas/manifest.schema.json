@@ -9,8 +9,8 @@
     "project": {"type": "string", "minLength": 1},
     "audiences": {
       "type": "object",
-      "minProperties": 1,
-      "additionalProperties": {
+          "minProperties": 1,
+            "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
         "required": ["base_url", "audience"],
@@ -56,14 +56,37 @@
             "additionalProperties": false,
             "required": ["subject", "scopes"],
             "properties": {
+              "name": {"type": "string", "minLength": 1},
               "subject": {"type": "string", "minLength": 1},
-              "type": {"enum": ["human", "agent", "observer"]},
+                "type": {"enum": ["human", "agent", "observer"]},
+                "principal_type": {"enum": ["human", "agent", "observer"]},
               "scopes": {
                 "type": "array",
                 "minItems": 1,
                 "uniqueItems": true,
                 "items": {"type": "string", "minLength": 1}
               }
+            }
+          }
+        },
+        "application": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["identity"],
+          "properties": {
+            "identity": {"type": "string", "minLength": 1},
+            "audience": {"type": "string", "minLength": 1}
+          }
+        },
+        "adapter": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": {"enum": ["declarative_mapping", "custom"]},
+            "mappings": {
+              "type": "object",
+              "additionalProperties": {"type": "string", "minLength": 1}
             }
           }
         }

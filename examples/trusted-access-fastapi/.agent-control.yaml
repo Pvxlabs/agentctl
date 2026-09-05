@@ -1,0 +1,44 @@
+project: trusted-access-fastapi
+audiences:
+  dev:
+    base_url: http://127.0.0.1:8000
+    audience: trusted-access-fastapi-dev
+actions:
+  health.read:
+    method: GET
+    path: /health
+    scope: app:read
+    audience: dev
+trusted_access:
+  enabled: true
+  environment: dev
+  transports:
+    - localhost
+    - tailscale
+  application:
+    identity: trusted-access-fastapi
+    audience: trusted-access-fastapi-dev
+  adapter:
+    type: declarative_mapping
+    mappings:
+      dev-user: fastapi-dev-user
+      dev-admin: fastapi-dev-admin
+      dev-agent: fastapi-dev-agent
+  principals:
+    user:
+      subject: dev-user
+      type: human
+      scopes:
+        - app:read
+    admin:
+      subject: dev-admin
+      type: human
+      scopes:
+        - app:read
+        - app:admin
+    agent:
+      subject: dev-agent
+      type: agent
+      scopes:
+        - app:read
+        - app:test

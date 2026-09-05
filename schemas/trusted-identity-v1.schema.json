@@ -13,7 +13,7 @@
     "scopes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
     "aud": {"type": "string", "minLength": 1},
     "environment": {"enum": ["dev", "development"]},
-    "transport": {"enum": ["localhost", "tailscale"]},
+    "transport": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,256}$"},
     "iat": {"type": "integer", "minimum": 0},
     "nbf": {"type": "integer", "minimum": 0},
     "exp": {"type": "integer", "minimum": 1},
