@@ -68,6 +68,46 @@ transports, at least one principal, unique subject/type pairs, and explicit
 scopes. Application and adapter fields are schema-validated and unknown fields
 are rejected.
 
+## Canonical DEV Runtime
+
+`TrustedAccessRuntime` is the host-local lifecycle boundary for one reusable
+DEV authority. It reuses `LocalIdentity`, `Registry`, `SQLiteReplayStore`, and
+`JsonlAuditSink`; it does not introduce another wire protocol or proxy HTTP
+traffic. The default layout is:
+
+```text
+$AGENTCTL_RUNTIME_DIR
+or $XDG_STATE_HOME/agentctl/trusted-access
+or ~/.local/state/agentctl/trusted-access
+
+authority.json   # private Ed25519 identity, mode 0600
+registry.json    # public registry and revocation state, mode 0600
+replay.sqlite    # durable consume-once JTI store, mode 0600
+audit.jsonl      # hash-chained lifecycle and access audit, mode 0600
+runtime.json     # versioned runtime metadata, mode 0600
+```
+
+The directory is mode `0700`. Bootstrap requires an enabled DEV policy and
+fails closed for missing, malformed, mismatched, revoked, or unsafe state. A
+missing registry can be recovered only from a valid authority identity;
+bootstrap never silently recreates a revoked authority. Rotation is explicit:
+the new key becomes the issuance key and the previous key remains registered
+until its assertions expire or an operator explicitly revokes it.
+
+The lifecycle commands are:
+
+```bash
+agentctl trusted-access bootstrap --manifest .agent-control.yaml
+agentctl trusted-access status --manifest .agent-control.yaml
+agentctl trusted-access doctor --manifest .agent-control.yaml
+agentctl trusted-access rotate-authority --manifest .agent-control.yaml
+agentctl trusted-access revoke-authority --manifest .agent-control.yaml
+```
+
+All commands support `--runtime-dir` and `--json`. `doctor` additionally
+checks the configured Tailscale LocalAPI socket when `tailscale` is enabled.
+Runtime state is operational host state and must not be committed.
+
 ## Python integration
 
 Install the application framework separately from agentctl, then construct the
@@ -76,7 +116,7 @@ SDK with the existing registry/replay components and an application adapter:
 ```python
 from agentctl.application import DeclarativeMappingAdapter, TrustedAccessSDK
 from agentctl.integrations.fastapi import create_fastapi_dependency
-from agentctl.replay import SQLiteReplayStore
+from agentctl.runtime import TrustedAccessRuntime, TrustedAccessRuntimePaths
 from agentctl.trusted import (
     LocalhostTransportVerifier,
     TAILSCALE_LOCALAPI_SOCKET,
@@ -85,6 +125,8 @@ from agentctl.trusted import (
     TrustedIdentityVerifier,
 )
 
+runtime = TrustedAccessRuntime(TrustedAccessRuntimePaths.from_dir())
+identity, registry, _authority, _authority_key = runtime.load_identity_registry(manifest)
 transport_verifiers = {"localhost": LocalhostTransportVerifier()}
 if "tailscale" in manifest.trusted_access.transports:
     transport_verifiers["tailscale"] = TailscaleLocalAPITransportVerifier(
@@ -94,8 +136,9 @@ if "tailscale" in manifest.trusted_access.transports:
 verifier = TrustedIdentityVerifier(
     registry,
     manifest.trusted_access,
-    SQLiteReplayStore(".agentctl/trusted-replay.sqlite"),
+    runtime.replay_store(),
     expected_audience="example-app-dev",
+    audit_sink=runtime.audit_sink(),
     transport_verifiers=transport_verifiers,
 )
 sdk = TrustedAccessSDK(
@@ -151,20 +194,20 @@ The local CLI path is:
 agentctl trusted-access init --path .
 agentctl trusted-access validate --manifest .agent-control.yaml
 agentctl trusted-access doctor --manifest .agent-control.yaml
+agentctl trusted-access bootstrap --manifest .agent-control.yaml
 agentctl trusted-access issue \
   --manifest .agent-control.yaml \
-  --identity-file .agentctl/dev-authority.json \
-  --registry-file .agentctl/registry.json \
   --principal agent \
   --scope app:read \
   --scope app:test \
   --out .agentctl/dev-agent.assertion
 ```
 
-`trusted-access issue` is deliberately local-only: it uses the local DEV
-authority and a fixed loopback observation. It is suitable for a local Codex,
-Claude, Playwright, or CI test process. It does not accept a user-supplied IP,
-forwarding header, or Tailscale identity.
+`trusted-access issue` uses the canonical local DEV runtime and a fixed loopback
+observation. It is suitable for a local Codex, Claude, Playwright, or CI test
+process. It does not accept a user-supplied IP, forwarding header, or
+Tailscale identity. The explicit identity/registry file form remains available
+for compatibility with older project-local setups.
 
 For a remote Tailscale browser or agent, the application or a separately
 controlled DEV authority must issue the assertion after verifying the actual

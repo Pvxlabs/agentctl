@@ -25,6 +25,7 @@ from .models import KeyRecord, PrincipalRecord, RequestContext, ScopeGrant
 from .protocol import build_assertion, canonical_request_target, parse_assertion, sha256_hex
 from .registry import Registry, encode_public_key, load_registry, save_registry
 from .replay import SQLiteReplayStore
+from .runtime import TrustedAccessRuntime, TrustedAccessRuntimePaths
 from .trusted import (
     LocalhostTransportVerifier,
     TAILSCALE_LOCALAPI_SOCKET,
@@ -394,6 +395,15 @@ def _tailscale_localapi_check(socket_path: str) -> tuple[str, str]:
 
 
 def _cmd_trusted_access_doctor(args: argparse.Namespace) -> int:
+    if _use_runtime_doctor(args):
+        manifest = load_manifest(args.manifest or find_manifest())
+        runtime = TrustedAccessRuntime(
+            TrustedAccessRuntimePaths.from_dir(args.runtime_dir),
+            tailscale_socket=args.tailscale_socket or os.environ.get("TAILSCALE_SOCKET"),
+        )
+        result = runtime.doctor(manifest)
+        _emit(result, json_output=True)
+        return 0 if result["overall"] == "PASS" else 1
     manifest = load_manifest(args.manifest or find_manifest())
     config = manifest.trusted_access
     checks: list[dict[str, str]] = []
@@ -436,6 +446,63 @@ def _cmd_trusted_access_doctor(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def _use_runtime_doctor(args: argparse.Namespace) -> bool:
+    """Keep the original project-local doctor compatible with ``init``.
+
+    Explicit runtime paths always select the lifecycle doctor.  With no path,
+    an existing project-local init state retains the legacy behavior; a host
+    without that state uses the standard XDG runtime.
+    """
+
+    if args.runtime_dir or args.identity_file or args.registry_file:
+        return bool(args.runtime_dir)
+    try:
+        manifest = load_manifest(args.manifest or find_manifest())
+    except (OSError, ValueError):
+        return True
+    local_state = manifest.source.parent / ".agentctl"
+    return not (local_state.joinpath("dev-authority.json").exists() and local_state.joinpath("registry.json").exists())
+
+
+def _runtime(args: argparse.Namespace) -> TrustedAccessRuntime:
+    return TrustedAccessRuntime(
+        TrustedAccessRuntimePaths.from_dir(args.runtime_dir),
+        tailscale_socket=args.tailscale_socket or os.environ.get("TAILSCALE_SOCKET"),
+    )
+
+
+def _cmd_trusted_access_bootstrap(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest or find_manifest())
+    result = _runtime(args).bootstrap(
+        manifest,
+        authority_id=args.authority_id,
+        key_id=args.key_id,
+    )
+    _emit(result, json_output=True)
+    return 0
+
+
+def _cmd_trusted_access_status(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest or find_manifest())
+    result = _runtime(args).status(manifest)
+    _emit(result, json_output=True)
+    return 0 if result.get("runtime_ready") else 1
+
+
+def _cmd_trusted_access_rotate(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest or find_manifest())
+    result = _runtime(args).rotate_authority(manifest)
+    _emit(result, json_output=True)
+    return 0
+
+
+def _cmd_trusted_access_revoke(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest or find_manifest())
+    result = _runtime(args).revoke_authority(manifest, key_id=args.key_id)
+    _emit(result, json_output=True)
+    return 0
+
+
 def _cmd_trusted_access_test(args: argparse.Namespace) -> int:
     manifest = load_manifest(args.manifest or find_manifest())
     try:
@@ -450,7 +517,16 @@ def _cmd_trusted_access_test(args: argparse.Namespace) -> int:
 def _cmd_trusted_access_issue(args: argparse.Namespace) -> int:
     manifest = load_manifest(args.manifest or find_manifest())
     config = manifest.trusted_access
-    identity, registry, _principal, _key = _identity_registry_context(args.identity_file, args.registry_file)
+    runtime: TrustedAccessRuntime | None = None
+    if args.runtime_dir is not None or (args.identity_file is None and args.registry_file is None):
+        if args.identity_file is not None or args.registry_file is not None:
+            raise ValueError("use either --runtime-dir or both --identity-file and --registry-file")
+        runtime = _runtime(args)
+        identity, registry, _principal, _key = runtime.load_identity_registry(manifest)
+    else:
+        if args.identity_file is None or args.registry_file is None:
+            raise ValueError("--identity-file and --registry-file must be provided together")
+        identity, registry, _principal, _key = _identity_registry_context(args.identity_file, args.registry_file)
     if config.application and config.application.audience:
         default_audience = config.application.audience
     elif len(manifest.audiences) == 1:
@@ -461,6 +537,7 @@ def _cmd_trusted_access_issue(args: argparse.Namespace) -> int:
         identity,
         registry,
         config,
+        audit_sink=runtime.audit_sink() if runtime is not None else None,
         transport_verifiers={"localhost": LocalhostTransportVerifier()},
     )
     assertion = authority.issue(
@@ -670,16 +747,44 @@ def _parser() -> argparse.ArgumentParser:
     trusted_access_doctor.add_argument("--identity-file")
     trusted_access_doctor.add_argument("--registry-file")
     trusted_access_doctor.add_argument("--tailscale-socket")
+    trusted_access_doctor.add_argument("--runtime-dir")
+    trusted_access_doctor.add_argument("--json", dest="json_output", action="store_true")
+    trusted_access_bootstrap = trusted_access_sub.add_parser("bootstrap")
+    trusted_access_bootstrap.add_argument("--manifest")
+    trusted_access_bootstrap.add_argument("--runtime-dir", default=None)
+    trusted_access_bootstrap.add_argument("--tailscale-socket")
+    trusted_access_bootstrap.add_argument("--authority-id", default="dev-authority")
+    trusted_access_bootstrap.add_argument("--key-id", default="dev-authority-key")
+    trusted_access_bootstrap.add_argument("--json", dest="json_output", action="store_true")
+    trusted_access_status = trusted_access_sub.add_parser("status")
+    trusted_access_status.add_argument("--manifest")
+    trusted_access_status.add_argument("--runtime-dir", default=None)
+    trusted_access_status.add_argument("--tailscale-socket")
+    trusted_access_status.add_argument("--json", dest="json_output", action="store_true")
+    trusted_access_rotate = trusted_access_sub.add_parser("rotate-authority")
+    trusted_access_rotate.add_argument("--manifest")
+    trusted_access_rotate.add_argument("--runtime-dir", default=None)
+    trusted_access_rotate.add_argument("--tailscale-socket")
+    trusted_access_rotate.add_argument("--json", dest="json_output", action="store_true")
+    trusted_access_revoke = trusted_access_sub.add_parser("revoke-authority")
+    trusted_access_revoke.add_argument("--manifest")
+    trusted_access_revoke.add_argument("--runtime-dir", default=None)
+    trusted_access_revoke.add_argument("--tailscale-socket")
+    trusted_access_revoke.add_argument("--key-id")
+    trusted_access_revoke.add_argument("--json", dest="json_output", action="store_true")
     trusted_access_issue = trusted_access_sub.add_parser("issue")
     trusted_access_issue.add_argument("--manifest")
-    trusted_access_issue.add_argument("--identity-file", required=True)
-    trusted_access_issue.add_argument("--registry-file", required=True)
+    trusted_access_issue.add_argument("--runtime-dir")
+    trusted_access_issue.add_argument("--identity-file")
+    trusted_access_issue.add_argument("--registry-file")
+    trusted_access_issue.add_argument("--tailscale-socket")
     trusted_access_issue.add_argument("--principal", required=True)
     trusted_access_issue.add_argument("--audience")
     trusted_access_issue.add_argument("--scope", action="append", required=True)
     trusted_access_issue.add_argument("--now", type=int)
     trusted_access_issue.add_argument("--ttl", type=int, default=60)
     trusted_access_issue.add_argument("--out")
+    trusted_access_issue.add_argument("--json", dest="json_output", action="store_true")
     trusted_access_sub.add_parser("test").add_argument("--manifest")
     trusted_access_sub.add_parser("conformance").add_argument("--manifest")
 
@@ -763,6 +868,14 @@ def main(argv: list[str] | None = None) -> int:
                 return _cmd_trusted_access_init(args)
             if args.trusted_access_action == "doctor":
                 return _cmd_trusted_access_doctor(args)
+            if args.trusted_access_action == "bootstrap":
+                return _cmd_trusted_access_bootstrap(args)
+            if args.trusted_access_action == "status":
+                return _cmd_trusted_access_status(args)
+            if args.trusted_access_action == "rotate-authority":
+                return _cmd_trusted_access_rotate(args)
+            if args.trusted_access_action == "revoke-authority":
+                return _cmd_trusted_access_revoke(args)
             if args.trusted_access_action == "issue":
                 return _cmd_trusted_access_issue(args)
             if args.trusted_access_action == "test":

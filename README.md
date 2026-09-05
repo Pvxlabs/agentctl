@@ -159,6 +159,31 @@ or ambiguous configuration fails closed. See
 verification order and [docs/trusted-access.md](docs/trusted-access.md) for
 the Human Browser, AI Agent, and Production Machine paths.
 
+### Canonical Runtime
+
+The reusable authority runtime is initialized once per DEV host:
+
+```bash
+agentctl trusted-access bootstrap --manifest .agent-control.yaml
+agentctl trusted-access status --manifest .agent-control.yaml
+agentctl trusted-access doctor --manifest .agent-control.yaml
+agentctl trusted-access issue \
+  --manifest .agent-control.yaml \
+  --principal agent \
+  --scope app:read \
+  --scope app:test \
+  --out .agentctl/dev-agent.assertion
+```
+
+Runtime state defaults to `$AGENTCTL_RUNTIME_DIR`, then
+`$XDG_STATE_HOME/agentctl/trusted-access`, then
+`~/.local/state/agentctl/trusted-access`. It contains a private Ed25519
+authority, public registry, durable replay database, hash-chained audit log,
+and metadata. `rotate-authority` creates a new signing key while retaining
+the previous key for normal short-lived assertion expiry; `revoke-authority`
+explicitly disables a key. No runtime private key or mutable state belongs in
+the repository.
+
 ## Development
 
 ```bash
