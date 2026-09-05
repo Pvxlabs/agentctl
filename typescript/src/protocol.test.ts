@@ -10,6 +10,7 @@ import {
   sha256Hex,
 } from "./protocol.js";
 import { MemoryReplayStore, VerificationError, verifyAgentRequest, type Registry } from "./verifier.js";
+import { LocalhostTransportVerifier, TailscaleTransportVerifier, TrustedAccessAuthority, TrustedAccessError, TrustedIdentityVerifier, type TrustedAccessConfig } from "./trusted.js";
 
 const vector = JSON.parse(readFileSync(new URL("../../vectors/assertion-v1.json", import.meta.url), "utf8")) as {
   assertion: string;
@@ -99,4 +100,51 @@ test("TypeScript verifier rejects request substitution", () => {
     () => verifyAgentRequest({ assertion: build("ts-jti-0002"), request: { method: "GET", target: vector.request.target, body: Buffer.from(vector.request.body), contentType: vector.request.content_type, requestId: vector.request.request_id, resource: vector.request.resource }, registry, replayStore: new MemoryReplayStore(), expectedAudience: "vector-api", expectedEnvironment: "development", now: 1_700_000_001 }),
     (error: unknown) => error instanceof VerificationError && error.code === "METHOD_MISMATCH",
   );
+});
+
+test("TypeScript Trusted DEV identity establishes an application-neutral subject once", () => {
+  const config: TrustedAccessConfig = {
+    enabled: true,
+    environment: "development",
+    transports: ["localhost"],
+    principals: { agent: { name: "agent", subject: "dev-agent", principal_type: "agent", scopes: ["app:read", "app:test"] } },
+  };
+  const transport = new LocalhostTransportVerifier();
+  const authority = new TrustedAccessAuthority(privateKey, "vector-agent", "vector-key", registry, config, { localhost: transport });
+  const assertion = authority.issue({ requestedPrincipal: "agent", audience: "dev-api", scopes: ["app:test"], observation: { transport: "localhost", peerAddress: "127.0.0.1" }, now: 1_700_000_000 });
+  const verifier = new TrustedIdentityVerifier(registry, config, new MemoryReplayStore(), "dev-api", { localhost: transport });
+  const evidence = verifier.verify(assertion, { observation: { transport: "localhost", peerAddress: "127.0.0.1" }, now: 1_700_000_001 });
+  assert.equal(evidence.sub, "dev-agent");
+  assert.throws(() => verifier.verify(assertion, { observation: { transport: "localhost", peerAddress: "127.0.0.1" }, now: 1_700_000_001 }), (error: unknown) => error instanceof TrustedAccessError && error.code === "REPLAYED_JTI");
+  assert.throws(() => transport.verify({ transport: "localhost", peerAddress: "100.90.1.2" }), (error: unknown) => error instanceof TrustedAccessError && error.code === "UNTRUSTED_TRANSPORT");
+});
+
+test("TypeScript Trusted DEV identity rejects expiry, tampering, malformed keys, and production config", () => {
+  const config: TrustedAccessConfig = {
+    enabled: true,
+    environment: "development",
+    transports: ["localhost"],
+    principals: { agent: { name: "agent", subject: "dev-agent", principal_type: "agent", scopes: ["app:test"] } },
+  };
+  const transport = new LocalhostTransportVerifier();
+  const authority = new TrustedAccessAuthority(privateKey, "vector-agent", "vector-key", registry, config, { localhost: transport });
+  const verifier = new TrustedIdentityVerifier(registry, config, new MemoryReplayStore(), "dev-api", { localhost: transport });
+  const expired = authority.issue({ requestedPrincipal: "agent", audience: "dev-api", scopes: ["app:test"], observation: { transport: "localhost", peerAddress: "127.0.0.1" }, now: 1_700_000_000, ttlSeconds: 1 });
+  assert.throws(() => verifier.verify(expired, { observation: { transport: "localhost", peerAddress: "127.0.0.1" }, now: 1_700_000_001 }), (error: unknown) => error instanceof TrustedAccessError && error.code === "EXPIRED");
+  const fresh = authority.issue({ requestedPrincipal: "agent", audience: "dev-api", scopes: ["app:test"], observation: { transport: "localhost", peerAddress: "127.0.0.1" }, now: 1_700_000_000 });
+  const parts = fresh.split(".");
+  parts[2] = `${parts[2][0] === "A" ? "B" : "A"}${parts[2].slice(1)}`;
+  assert.throws(() => verifier.verify(parts.join("."), { observation: { transport: "localhost", peerAddress: "127.0.0.1" }, now: 1_700_000_001 }), (error: unknown) => error instanceof TrustedAccessError && error.code === "BAD_SIGNATURE");
+  const badRegistry = { ...registry, keys: [{ ...registry.keys[0], public_key: "bad" }] };
+  const badVerifier = new TrustedIdentityVerifier(badRegistry, config, new MemoryReplayStore(), "dev-api", { localhost: transport });
+  assert.throws(() => badVerifier.verify(fresh, { observation: { transport: "localhost", peerAddress: "127.0.0.1" }, now: 1_700_000_001 }), (error: unknown) => error instanceof TrustedAccessError && error.code === "INVALID_REGISTRY");
+  assert.throws(() => new TrustedIdentityVerifier(registry, { ...config, environment: "production" }, new MemoryReplayStore(), "dev-api", { localhost: transport }), (error: unknown) => error instanceof TrustedAccessError && error.code === "TRUSTED_ACCESS_NOT_DEV");
+  assert.throws(() => new TrustedIdentityVerifier(registry, { ...config, transports: ["localhost", "localhost"] }, new MemoryReplayStore(), "dev-api", { localhost: transport }), (error: unknown) => error instanceof TrustedAccessError && error.code === "INVALID_TRUSTED_ACCESS_CONFIGURATION");
+});
+
+test("TypeScript Tailscale resolver errors are untrusted transport", () => {
+  const verifier = new (class extends TailscaleTransportVerifier {
+    constructor() { super(() => { throw new Error("resolver unavailable"); }); }
+  })();
+  assert.throws(() => verifier.verify({ transport: "tailscale", peerAddress: "100.90.1.2" }), (error: unknown) => error instanceof TrustedAccessError && error.code === "UNTRUSTED_TRANSPORT");
 });

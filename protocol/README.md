@@ -17,3 +17,14 @@ query pairs are decoded and sorted by decoded name/value, and spaces are
 encoded as `%20`. The body digest always covers the bytes sent on the wire.
 
 See [SPEC.md](../SPEC.md) for the complete V1 contract.
+
+Trusted Development Access uses a separate signed identity envelope:
+
+```text
+agentctl-tdi1.<base64url(canonical-json(payload))>.<base64url(ed25519-signature)>
+```
+
+It carries an application-neutral subject, exact sorted scopes, DEV
+environment, audience, verified transport, authority key/epochs, and a
+consume-once JTI. It is intentionally not an AAV1 request assertion and does
+not contain application usernames or passwords.

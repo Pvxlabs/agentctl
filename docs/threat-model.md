@@ -34,6 +34,10 @@
 | Confused deputy | `iss == sub`, exact audience, exact request binding, and target-domain authority remains separate. |
 | Secret leakage | No secret fields in manifests or audit; private key file permissions are restricted for local development. |
 | Audit tampering | Append-only JSONL sink with hash chaining and verification command. |
+| Trusted DEV transport spoofing | Socket peer metadata for localhost; server-side Tailscale peer resolver plus address-family check; forwarded headers rejected. |
+| DEV identity replay | Short-lived `agentctl-tdi1` assertion with durable consume-once JTI. |
+| DEV-to-production confusion | Trusted policy accepts only exact `dev`/`development`; enabled production policy is rejected; verifier rechecks environment. |
+| Application account substitution | Core emits only application-neutral subjects; adapter owns mapping and normal application authorization remains required. |
 
 ## Residual risks
 
@@ -62,3 +66,7 @@
 - Does the target project still perform domain authorization and canonical
   readback after mutations?
 - Does the integration grant only explicit production scopes and audiences?
+- Is trusted DEV access explicitly enabled and independently configured for each
+  DEV deployment?
+- Is the Tailscale peer resolver backed by a server-side LocalAPI or equivalent,
+  rather than request headers or an IP allowlist alone?

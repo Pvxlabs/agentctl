@@ -253,7 +253,60 @@ approve/activate scopes to ORION's existing canonical API and leaves
 must first identify a suitable canonical machine-control API; no Terminal code is
 copied and no production endpoint is called by this repository.
 
-## 12. Definition of done
+## 12. Trusted Development Access
+
+Trusted Development Access is a separate identity-establishment protocol. It
+does not weaken AAV1 and it does not create application accounts.
+
+The policy is optional and disabled by default. When enabled, its environment
+must be exactly `dev` or `development`; any production environment is rejected.
+The policy names application-neutral subjects and exact application-defined
+scopes. The authority requires all of the following before issuing an identity
+assertion:
+
+```text
+environment is DEV
+AND trusted_access.enabled is true
+AND the configured transport verifier proves the connection
+AND the requested principal exists in policy
+AND every requested scope exists in that principal's allowlist
+```
+
+The wire format is:
+
+```text
+agentctl-tdi1.<base64url(canonical-json(payload))>.<base64url(ed25519-signature)>
+```
+
+The payload contains `iss`, `sub`, `principal_type`, sorted unique `scopes`,
+`aud`, DEV `environment`, verified `transport`, `iat`, `nbf`, `exp`, `jti`,
+`kid`, and authority revocation epochs. Tailscale transport requires both a
+peer address in the configured tailnet range and a server-side peer resolver
+(for example, Tailscale LocalAPI). A forwarded header, client-provided IP, or
+bare `100.x` address is not a proof.
+
+The target application verifies the assertion, consumes its JTI, maps `sub` in
+an application-owned adapter, establishes its normal authenticated session,
+and continues ordinary role/scope/domain authorization. The assertion does not
+replace application authorization.
+
+The invariant for this path is named `TRUSTED_DEV_ACCESS_INVARIANT`:
+
+```text
+environment == DEV
+AND trusted_access.enabled == true
+AND trusted transport is server-verified
+AND requested principal and scopes are explicitly allowed
+```
+
+All four conditions are required. Missing, ambiguous, production, spoofed, or
+stale inputs deny by default.
+
+The CLI command `agentctl trusted-access validate` only validates and displays
+manifest policy. Assertion issuance is intentionally a server-side authority
+operation so a CLI cannot manufacture transport proof from user input.
+
+## 13. Definition of done
 
 - Research and threat model are documented.
 - Protocol, schema, CLI, Python verifier, and TypeScript verifier run locally.

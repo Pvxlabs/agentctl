@@ -17,3 +17,18 @@ The receiving ORION middleware verifies the machine assertion, then passes the
 request to the existing `StrategyReleaseRepository` and ORION domain
 authority. Approval, activation, transaction validity, and canonical readback
 remain ORION decisions.
+
+For DEV-only entrypoints, ORION may configure application-neutral policies such
+as `dev-user` and `dev-admin`. Its adapter, not agentctl core, performs the
+mapping:
+
+```text
+dev-user  -> user@test.local
+dev-admin -> admin@test.local
+dev-agent -> an ORION test principal with only the declared test/read scopes
+```
+
+The adapter must establish a normal ORION session and run the existing ORION
+authorization checks after verifying the signed identity assertion. These
+names and mappings are examples only and are not part of the agentctl wire
+protocol.

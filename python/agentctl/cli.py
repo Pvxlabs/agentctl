@@ -196,6 +196,42 @@ def _cmd_capabilities(args: argparse.Namespace) -> int:
             "manifest": str(manifest.source),
             "audiences": {name: config.__dict__ for name, config in manifest.audiences.items()},
             "actions": {name: config.__dict__ for name, config in manifest.actions.items()},
+            "trusted_access": {
+                "enabled": manifest.trusted_access.enabled,
+                "environment": manifest.trusted_access.environment,
+                "transports": list(manifest.trusted_access.transports),
+                "principals": {
+                    name: {
+                        "subject": policy.subject,
+                        "type": policy.principal_type,
+                        "scopes": list(policy.scopes),
+                    }
+                    for name, policy in (manifest.trusted_access.principals or {}).items()
+                },
+            },
+        },
+        json_output=True,
+    )
+    return 0
+
+
+def _cmd_trusted_access(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest or find_manifest())
+    config = manifest.trusted_access
+    _emit(
+        {
+            "project": manifest.project,
+            "manifest": str(manifest.source),
+            "trusted_access": {
+                "enabled": config.enabled,
+                "environment": config.environment,
+                "transports": list(config.transports),
+                "principals": {
+                    name: {"subject": policy.subject, "type": policy.principal_type, "scopes": list(policy.scopes)}
+                    for name, policy in (config.principals or {}).items()
+                },
+            },
+            "status": "ENABLED" if config.enabled else "DISABLED",
         },
         json_output=True,
     )
@@ -371,6 +407,11 @@ def _parser() -> argparse.ArgumentParser:
     capabilities = subparsers.add_parser("capabilities")
     capabilities.add_argument("--manifest")
 
+    trusted_access = subparsers.add_parser("trusted-access")
+    trusted_access_sub = trusted_access.add_subparsers(dest="trusted_access_action", required=True)
+    trusted_access_validate = trusted_access_sub.add_parser("validate")
+    trusted_access_validate.add_argument("--manifest")
+
     sign = subparsers.add_parser("sign")
     sign.add_argument("--identity-file", required=True)
     sign.add_argument("--registry-file", required=True)
@@ -444,6 +485,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_principals(args)
         if args.command == "capabilities":
             return _cmd_capabilities(args)
+        if args.command == "trusted-access":
+            if args.trusted_access_action == "validate":
+                return _cmd_trusted_access(args)
+            raise ValueError("trusted-access subcommand is required")
         if args.command == "sign":
             return _cmd_sign(args)
         if args.command == "verify":

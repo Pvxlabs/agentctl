@@ -8,3 +8,7 @@ readback without adding Terminal-specific concepts to the wire protocol.
 
 No Terminal source, credentials, production endpoint, or database path is
 included here.
+
+Terminal can use the same core contract with different application-neutral
+subjects and scopes. Its adapter owns the mapping to a normal Terminal
+principal; no ORION account names or assumptions are shared by agentctl.

@@ -15,3 +15,17 @@ from .protocol import (  # noqa: F401
     serialize_assertion,
     sha256_hex,
 )
+from .trusted import (  # noqa: F401
+    LocalhostTransportVerifier,
+    TailscaleTransportVerifier,
+    TransportObservation,
+    TrustedAccessAuthority,
+    TrustedAccessConfig,
+    TrustedAccessError,
+    TrustedIdentityEvidence,
+    TrustedIdentityVerifier,
+    TrustedPrincipalPolicy,
+    establish_application_principal,
+    is_dev_environment,
+    parse_trusted_identity_assertion,
+)

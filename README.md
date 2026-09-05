@@ -88,6 +88,8 @@ not implement a secret manager.
 - `schemas/`: JSON Schemas for assertions and project manifests.
 - `vectors/`: cross-language golden vectors.
 - `examples/`: generic middleware plus ORION and Terminal adapter contracts.
+- `python/agentctl/trusted.py`: Trusted Development Access authority,
+  transport proofs, signed identity assertions, and application adapter hook.
 - `skill/SKILL.md`: instructions for coding and deployment agents.
 - `docs/`: research notes and threat model.
 - `tests/`: protocol, security, and parity tests.
@@ -103,6 +105,49 @@ canonical readback.
 The audit model never records private keys, raw credentials, or bearer tokens.
 An `EXECUTED` audit event means the target request received a transport response;
 it is not a claim that the target business operation succeeded.
+
+## Trusted Development Access
+
+Trusted DEV access is an identity-establishment path, not an authentication
+disable switch. A target server passes server-owned connection metadata to the
+authority or verifier:
+
+```text
+verified localhost/Tailscale transport
+  -> explicit DEV policy
+  -> application-neutral subject and scopes
+  -> short-lived signed identity assertion
+  -> application adapter maps subject to its normal session principal
+  -> existing application authorization
+```
+
+`localhost` is proven from the socket peer address. `tailscale` requires both
+the expected tailnet address range and a server-side peer identity resolver,
+such as a Tailscale LocalAPI integration. Forwarded headers and a bare `100.x`
+address are never sufficient. The core never contains application accounts;
+ORION, Terminal, and other projects own their subject-to-account adapters.
+
+The manifest policy is optional and disabled by default:
+
+```yaml
+trusted_access:
+  enabled: true
+  environment: dev
+  transports: [localhost, tailscale]
+  principals:
+    user:
+      subject: dev-user
+      scopes: [app:read]
+    agent:
+      subject: dev-agent
+      type: agent
+      scopes: [app:read, app:test]
+```
+
+An enabled policy with a production environment, unknown transport, missing
+principal, ambiguous fields, or a missing server-side transport verifier fails
+closed. Existing AAV1 machine request authentication and production behavior
+are unchanged.
 
 ## Development
 

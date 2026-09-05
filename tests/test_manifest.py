@@ -80,3 +80,38 @@ unexpected: true
     )
     with pytest.raises(ValueError, match="cannot load manifest"):
         load_manifest(unknown_path)
+
+
+def test_manifest_loads_trusted_dev_policy_and_rejects_production_policy(tmp_path: Path) -> None:
+    path = tmp_path / "trusted.yaml"
+    path.write_text(
+        """\
+project: trusted
+audiences:
+  demo:
+    base_url: https://api.example.test
+    audience: demo-api
+actions:
+  records.read:
+    method: GET
+    path: /records
+    scope: records.read
+trusted_access:
+  enabled: true
+  environment: dev
+  transports: [localhost]
+  principals:
+    agent:
+      subject: dev-agent
+      type: agent
+      scopes: [app:read]
+""",
+        encoding="utf-8",
+    )
+    manifest = load_manifest(path)
+    assert manifest.trusted_access.enabled
+    assert manifest.trusted_access.principals["agent"].subject == "dev-agent"
+
+    path.write_text(path.read_text(encoding="utf-8").replace("environment: dev", "environment: production"), encoding="utf-8")
+    with pytest.raises(ValueError, match="trusted access can only be enabled for DEV"):
+        load_manifest(path)
