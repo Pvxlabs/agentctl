@@ -38,6 +38,8 @@ DEFAULT_DEV_PROFILE: dict[str, DevIdentityProfile] = {
     "agent": DevIdentityProfile("dev-agent", "agent@test.local", "user"),
 }
 
+DEFAULT_ADAPTER_MODULE = "agentctl_trusted_access_adapter:adapter"
+
 
 class OnboardingError(TrustedAccessError):
     """A stable blocker that prevents onboarding from claiming readiness."""
@@ -225,7 +227,7 @@ def _fresh_manifest(facts: ProjectFacts) -> dict[str, Any]:
     port = 8000 if facts.framework == "fastapi" else 3000
     project = facts.root.name.lower().replace("_", "-").replace(" ", "-") or "trusted-app"
     audience = f"{project}-dev"
-    return {
+    value: dict[str, Any] = {
         "project": project,
         "audiences": {"dev": {"base_url": f"http://127.0.0.1:{port}", "audience": audience}},
         "actions": {"health.read": {"method": "GET", "path": "/", "scope": "app:read", "audience": "dev"}},
@@ -243,6 +245,15 @@ def _fresh_manifest(facts: ProjectFacts) -> dict[str, Any]:
             "dev_profile": _profile_mapping(DEFAULT_DEV_PROFILE),
         },
     }
+    # This is an explicit, application-owned convention rather than broad
+    # script discovery.  The file is never generated or executed by agentctl;
+    # it is only wired into a new manifest when the consumer already provides
+    # the documented adapter seam.
+    if (facts.root / "agentctl_trusted_access_adapter.py").is_file():
+        value["trusted_access"]["onboarding"] = {
+            "identity_bootstrap": {"type": "adapter", "module": DEFAULT_ADAPTER_MODULE},
+        }
+    return value
 
 
 def _write_manifest(path: Path, value: dict[str, Any]) -> None:
@@ -478,7 +489,11 @@ def onboard(path: str | Path = ".", *, runtime_dir: str | Path | None = None, pl
         if not plan:
             _write_manifest(manifest_path, value)
             created_manifest = True
-        manifest = load_manifest(manifest_path) if not plan else None
+            # Refresh the facts after creating the manifest so the result
+            # reflects the effective DEV policy rather than the pre-onboard
+            # project state.
+            facts = _detect_project(path)
+            manifest = load_manifest(manifest_path) if not plan else None
     else:
         try:
             manifest = load_manifest(manifest_path)
@@ -550,20 +565,16 @@ def format_onboarding(result: Mapping[str, Any]) -> str:
     startup = smoke.get("startup", {}) if isinstance(smoke, Mapping) else {}
     lines = [
         "Trusted Access onboarding",
-        f"Project ................. {project.get('root', 'unknown')}",
-        f"Framework ............... {project.get('framework', 'unknown')}",
+        f"Project ................. {project.get('framework', 'unknown')}",
         f"Environment ............. {str(result.get('DEV_ENVIRONMENT', 'unknown')).upper()}",
         f"Transport ............... {', '.join(transports) if transports else 'manifest-defined'}",
         f"Runtime ................. {'ready' if runtime.get('status') == 'PASS' or runtime.get('runtime_ready') else runtime.get('status', 'inspect')}",
-        "DEV identities:",
     ]
-    for item in identities.values():
-        if isinstance(item, Mapping) and "account" in item:
-            lines.append(f"  {item['account']} ........ {item.get('status', 'inspect')}")
+    identity_states = [item.get("status") for item in identities.values() if isinstance(item, Mapping)]
+    identity_ready = bool(identity_states) and all(status == "PASS" for status in identity_states)
     lines.extend([
-        f"Application mapping ..... {integration.get('status', 'inspect')}",
-        f"Session integration ..... {result.get('BOOTSTRAP_STRATEGY', 'inspect')}",
-        f"DEV startup ............. {startup.get('status', 'inspect') if isinstance(startup, Mapping) else 'inspect'}",
+        f"DEV identities .......... {'ready' if identity_ready else 'blocked'}",
+        f"Integration ............. {'ready' if integration.get('status') == 'PASS' else integration.get('status', 'inspect')}",
         f"Smoke ................... {smoke.get('protocol', smoke.get('status', 'inspect'))}",
         f"TRUSTED_ACCESS_READY={'YES' if result.get('ready') else 'NO'}",
     ])

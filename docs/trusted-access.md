@@ -305,6 +305,14 @@ closed. The fallback password value may be passed to an application adapter
 for DEV account creation, but credentials are never part of an assertion or
 the canonical Trusted Access authentication path.
 
+For a new consumer that already exposes this seam, onboarding wires the
+explicit convention `agentctl_trusted_access_adapter.py:adapter` into a newly
+generated manifest. The module must export either an adapter instance or an
+adapter class implementing the four methods above. agentctl does not generate
+this file, inspect arbitrary Python modules, or execute discovered scripts. If
+the convention is absent, identity readiness remains blocked until the
+application declares its own adapter or command contract.
+
 Onboarding metadata is not part of ATIP and does not change application
 authorization. The application still maps `dev-user`, `dev-admin`, and
 `dev-agent` to its own accounts, creates its ordinary session, and enforces

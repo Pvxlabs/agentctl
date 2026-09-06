@@ -90,6 +90,50 @@ def test_fresh_plan_is_read_only_and_contains_canonical_profile(tmp_path: Path) 
     assert result["ready"] is False
 
 
+def test_fresh_manifest_wires_only_explicit_application_adapter_convention(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    (root / "agentctl_trusted_access_adapter.py").write_text("adapter = object()\n", encoding="utf-8")
+
+    result = onboarding.build_onboarding_plan(root).to_dict()
+
+    assert result["manifest"]["value"]["trusted_access"]["onboarding"] == {
+        "identity_bootstrap": {
+            "type": "adapter",
+            "module": "agentctl_trusted_access_adapter:adapter",
+        }
+    }
+
+
+def test_fresh_manifest_does_not_guess_identity_bootstrap(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+
+    result = onboarding.build_onboarding_plan(root).to_dict()
+
+    assert "onboarding" not in result["manifest"]["value"]["trusted_access"]
+
+
+def test_onboard_uses_explicit_adapter_and_reports_effective_dev_state(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    (root / "agentctl_trusted_access_adapter.py").write_text(
+        """
+class Adapter:
+    states = {}
+    def inspect_identity(self, account): return self.states.get(account)
+    def ensure_identity(self, account, role, **_kwargs): self.states[account] = {"active": True, "role": role}
+    def validate_role(self, account, role): return self.states.get(account, {}).get("role") == role
+    def validate_active(self, account): return self.states.get(account, {}).get("active") is True
+adapter = Adapter()
+""",
+        encoding="utf-8",
+    )
+
+    result = onboarding.onboard(root, runtime_dir=tmp_path / "runtime")
+
+    assert result["ready"] is True
+    assert result["DEV_ENVIRONMENT"] == "dev"
+    assert all(item["status"] == "PASS" for item in result["identities"].values())
+
+
 def test_existing_manifest_is_not_overwritten_by_plan(tmp_path: Path) -> None:
     root = _project(tmp_path)
     path = _write_manifest(root, _manifest_value())
