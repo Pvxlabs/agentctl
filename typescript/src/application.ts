@@ -106,6 +106,15 @@ export class TrustedAccessSDK<TApplicationPrincipal> {
     return { agentctlPrincipal, applicationPrincipal: this.establish(agentctlPrincipal) };
   }
 
+  authenticateHandoffWithContext(assertion: string, now: number): ApplicationAuthentication<TApplicationPrincipal> {
+    const agentctlPrincipal = this.verifier.verifyHandoffPrincipal(assertion, now);
+    return { agentctlPrincipal, applicationPrincipal: this.establish(agentctlPrincipal) };
+  }
+
+  authenticateHandoff(assertion: string, now: number): TApplicationPrincipal {
+    return this.authenticateHandoffWithContext(assertion, now).applicationPrincipal;
+  }
+
   static requireScope(principal: AgentctlPrincipal, scope: string): void {
     principal.requireScope(scope);
   }

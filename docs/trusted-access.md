@@ -268,8 +268,8 @@ DEV application while keeping the existing authority, verifier, replay, audit,
 and application adapter boundaries:
 
 ```bash
-agentctl trusted-access onboard --path . --plan
-agentctl trusted-access onboard --path .
+agentctl trusted-access onboard --plan
+agentctl trusted-access onboard
 ```
 
 `--plan` is read-only. It detects the project framework, reports existing
@@ -305,13 +305,14 @@ closed. The fallback password value may be passed to an application adapter
 for DEV account creation, but credentials are never part of an assertion or
 the canonical Trusted Access authentication path.
 
-For a new consumer that already exposes this seam, onboarding wires the
-explicit convention `agentctl_trusted_access_adapter.py:adapter` into a newly
-generated manifest. The module must export either an adapter instance or an
-adapter class implementing the four methods above. agentctl does not generate
-this file, inspect arbitrary Python modules, or execute discovered scripts. If
-the convention is absent, identity readiness remains blocked until the
-application declares its own adapter or command contract.
+For a fresh DEV consumer, onboarding writes the explicit convention
+`agentctl_trusted_access_adapter.py:adapter` and a small local identity-store
+scaffold into the project, then uses it to ensure the three DEV identities.
+The module is an application-owned seam: replace it with the application's
+normal DEV datastore adapter when one exists. agentctl does not inspect
+arbitrary modules or execute discovered scripts. Existing projects must still
+declare their own adapter or command contract; ambiguous account authority
+remains blocked.
 
 Onboarding metadata is not part of ATIP and does not change application
 authorization. The application still maps `dev-user`, `dev-admin`, and

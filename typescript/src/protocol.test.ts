@@ -119,6 +119,31 @@ test("TypeScript Trusted DEV identity establishes an application-neutral subject
   assert.throws(() => transport.verify({ transport: "localhost", peerAddress: "100.90.1.2" }), (error: unknown) => error instanceof TrustedAccessError && error.code === "UNTRUSTED_TRANSPORT");
 });
 
+test("TypeScript handoff requires explicit config, preserves signed peer identity, and remains replay-protected", () => {
+  const config: TrustedAccessConfig = {
+    enabled: true,
+    environment: "development",
+    transports: ["tailscale"],
+    handoff: { enabled: true },
+    principals: { agent: { subject: "dev-agent", principal_type: "agent", scopes: ["app:read"] } },
+  };
+  const transport = new TailscaleTransportVerifier((peer) => `node:${peer}`);
+  const authority = new TrustedAccessAuthority(privateKey, "vector-agent", "vector-key", registry, config, { tailscale: transport });
+  const verifier = new TrustedIdentityVerifier(registry, config, new MemoryReplayStore(), "dev-api", {});
+  const assertion = authority.issue({ requestedPrincipal: "agent", audience: "dev-api", scopes: ["app:read"], observation: { transport: "tailscale", peerAddress: "100.90.1.2" }, now: 1_700_000_000 });
+  assert.equal(verifier.verifyHandoff(assertion, 1_700_000_001).sub, "dev-agent");
+  assert.throws(() => verifier.verifyHandoff(assertion, 1_700_000_001), (error: unknown) => error instanceof TrustedAccessError && error.code === "REPLAYED_JTI");
+
+  const disabledConfig: TrustedAccessConfig = {
+    enabled: true,
+    environment: "development",
+    transports: ["localhost"],
+    principals: { agent: { subject: "dev-agent", principal_type: "agent", scopes: ["app:read"] } },
+  };
+  const disabledVerifier = new TrustedIdentityVerifier(registry, disabledConfig, new MemoryReplayStore(), "dev-api", { localhost: new LocalhostTransportVerifier() });
+  assert.throws(() => disabledVerifier.verifyHandoff(assertion, 1_700_000_001), (error: unknown) => error instanceof TrustedAccessError && error.code === "UNTRUSTED_TRANSPORT");
+});
+
 test("TypeScript Trusted DEV decisions use the existing audit sink without leaking assertions", () => {
   const config: TrustedAccessConfig = {
     enabled: true,

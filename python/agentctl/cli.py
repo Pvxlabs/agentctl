@@ -37,6 +37,7 @@ from .trusted import (
 )
 from .verifier import VerificationError, Verifier
 from .onboarding import OnboardingError, build_onboarding_plan, format_onboarding, onboard
+from .ingress import TrustedIngress, serve_ingress
 from .distribution import install_skill, read_skill_status, version_contract
 
 
@@ -527,6 +528,13 @@ def _cmd_trusted_access_status(args: argparse.Namespace) -> int:
     return 0 if result.get("runtime_ready") else 1
 
 
+def _cmd_trusted_access_ingress(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest or find_manifest())
+    ingress = TrustedIngress(manifest, _runtime(args))
+    serve_ingress(ingress)
+    return 0
+
+
 def _cmd_trusted_access_rotate(args: argparse.Namespace) -> int:
     manifest = load_manifest(args.manifest or find_manifest())
     result = _runtime(args).rotate_authority(manifest)
@@ -819,6 +827,10 @@ def _parser() -> argparse.ArgumentParser:
     trusted_access_status.add_argument("--runtime-dir", default=None)
     trusted_access_status.add_argument("--tailscale-socket")
     trusted_access_status.add_argument("--json", dest="json_output", action="store_true")
+    trusted_access_ingress = trusted_access_sub.add_parser("ingress")
+    trusted_access_ingress.add_argument("--manifest")
+    trusted_access_ingress.add_argument("--runtime-dir", default=None)
+    trusted_access_ingress.add_argument("--tailscale-socket")
     trusted_access_rotate = trusted_access_sub.add_parser("rotate-authority")
     trusted_access_rotate.add_argument("--manifest")
     trusted_access_rotate.add_argument("--runtime-dir", default=None)
@@ -932,6 +944,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _cmd_trusted_access_bootstrap(args)
             if args.trusted_access_action == "status":
                 return _cmd_trusted_access_status(args)
+            if args.trusted_access_action == "ingress":
+                return _cmd_trusted_access_ingress(args)
             if args.trusted_access_action == "rotate-authority":
                 return _cmd_trusted_access_rotate(args)
             if args.trusted_access_action == "revoke-authority":

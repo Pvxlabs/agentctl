@@ -104,12 +104,18 @@ def test_fresh_manifest_wires_only_explicit_application_adapter_convention(tmp_p
     }
 
 
-def test_fresh_manifest_does_not_guess_identity_bootstrap(tmp_path: Path) -> None:
+def test_fresh_plan_declares_generated_identity_bootstrap_scaffold(tmp_path: Path) -> None:
     root = _project(tmp_path)
 
     result = onboarding.build_onboarding_plan(root).to_dict()
 
-    assert "onboarding" not in result["manifest"]["value"]["trusted_access"]
+    assert result["manifest"]["value"]["trusted_access"]["onboarding"] == {
+        "identity_bootstrap": {
+            "type": "adapter",
+            "module": "agentctl_trusted_access_adapter:adapter",
+        }
+    }
+    assert "create agentctl_trusted_access_adapter.py" in result["changes"]
 
 
 def test_onboard_uses_explicit_adapter_and_reports_effective_dev_state(tmp_path: Path) -> None:
@@ -132,6 +138,21 @@ adapter = Adapter()
     assert result["ready"] is True
     assert result["DEV_ENVIRONMENT"] == "dev"
     assert all(item["status"] == "PASS" for item in result["identities"].values())
+
+
+def test_fresh_onboard_generates_adapter_and_second_run_has_no_changes(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    runtime_dir = tmp_path / "runtime"
+
+    first = onboarding.onboard(root, runtime_dir=runtime_dir)
+    second = onboarding.onboard(root, runtime_dir=runtime_dir)
+
+    assert first["ready"] is True
+    assert (root / "agentctl_trusted_access_adapter.py").is_file()
+    assert (root / ".agentctl" / "trusted-access-identities.json").is_file()
+    assert second["ready"] is True
+    assert second["changes"] == []
+    assert not list(root.glob("__pycache__/*"))
 
 
 def test_existing_manifest_is_not_overwritten_by_plan(tmp_path: Path) -> None:

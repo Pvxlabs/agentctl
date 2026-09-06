@@ -160,6 +160,13 @@ class TrustedAccessSDK(Generic[TApplicationPrincipal]):
         principal = self.verify(assertion, observation=observation, now=now)
         return ApplicationAuthentication(principal, self.establish(principal))
 
+    def authenticate_handoff_with_context(self, assertion: str, *, now: int) -> ApplicationAuthentication[TApplicationPrincipal]:
+        principal = self.verifier.verify_handoff(assertion, now=now).to_principal()
+        return ApplicationAuthentication(principal, self.establish(principal))
+
+    def authenticate_handoff(self, assertion: str, *, now: int) -> TApplicationPrincipal:
+        return self.authenticate_handoff_with_context(assertion, now=now).application_principal
+
     @staticmethod
     def require_scope(principal: AgentctlPrincipal, scope: str) -> None:
         principal.require_scope(scope)

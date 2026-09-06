@@ -46,12 +46,22 @@ export interface TrustedAccessConfig {
     restart?: { command: string[] };
     smoke?: { command: string[] };
   };
+  handoff?: { enabled: boolean };
+  ingress?: {
+    mode: "session_bootstrap";
+    bind: string;
+    port: number;
+    upstream: string;
+    endpoint: string;
+    surfaces: Record<string, { path: string; principal: string; audience: string; scopes: string[] }>;
+  };
 }
 
 export interface TransportObservation {
   transport: string;
   peerAddress?: string;
   forwardedHeadersPresent?: boolean;
+  handoff?: "trusted-ingress";
 }
 
 export interface TransportEvidence {
@@ -113,7 +123,7 @@ function validateTrustedPrincipalPolicy(name: string, value: unknown): TrustedPr
 
 export function validateTrustedAccessConfig(config: TrustedAccessConfig): TrustedAccessConfig {
   if (typeof config !== "object" || config === null || Array.isArray(config)) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted access config must be an object");
-  const unknown = Object.keys(config).filter((key) => !new Set(["enabled", "environment", "transports", "principals", "application", "adapter", "dev_profile", "onboarding"]).has(key));
+  const unknown = Object.keys(config).filter((key) => !new Set(["enabled", "environment", "transports", "principals", "application", "adapter", "dev_profile", "onboarding", "handoff", "ingress"]).has(key));
   if (unknown.length) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", `unknown trusted_access fields: ${unknown.join(", ")}`);
   if (typeof config.enabled !== "boolean") fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted_access.enabled must be boolean");
   if (config.environment !== undefined) identifier(config.environment, "trusted_access.environment");
@@ -180,6 +190,24 @@ export function validateTrustedAccessConfig(config: TrustedAccessConfig): Truste
         if (typeof bootstrap.module !== "string" || bootstrap.module.trim().length === 0) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "adapter identity bootstrap requires module");
         if (bootstrap.command !== undefined) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "adapter identity bootstrap cannot declare command");
       }
+    }
+  }
+  if (config.handoff !== undefined && (config.handoff === null || typeof config.handoff !== "object" || Object.keys(config.handoff).some((key) => key !== "enabled") || typeof config.handoff.enabled !== "boolean")) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted_access.handoff must contain boolean enabled");
+  if (config.ingress !== undefined) {
+    if (config.ingress === null || typeof config.ingress !== "object" || config.ingress.mode !== "session_bootstrap") fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress mode must be session_bootstrap");
+    if (config.handoff?.enabled !== true) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress requires handoff.enabled");
+    identifier(config.ingress.bind, "trusted ingress bind");
+    if (!Number.isInteger(config.ingress.port) || config.ingress.port < 1 || config.ingress.port > 65535) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress port is invalid");
+    if (!/^https?:\/\//u.test(config.ingress.upstream) || !config.ingress.endpoint.startsWith("/") || /[?#]/u.test(config.ingress.endpoint)) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress upstream or endpoint is invalid");
+    if (!config.ingress.surfaces || typeof config.ingress.surfaces !== "object" || Object.keys(config.ingress.surfaces).length === 0) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress surfaces must be non-empty");
+    const paths = new Set<string>();
+    for (const [name, surface] of Object.entries(config.ingress.surfaces)) {
+      identifier(name, "trusted ingress surface name");
+      if (!surface || typeof surface !== "object" || !surface.path.startsWith("/") || /[?#]/u.test(surface.path) || paths.has(surface.path) || !Array.isArray(surface.scopes) || surface.scopes.length === 0) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress surface is invalid");
+      identifier(surface.principal, "trusted ingress surface principal");
+      identifier(surface.audience, "trusted ingress surface audience");
+      surface.scopes.forEach((scope) => identifier(scope, "trusted ingress surface scope"));
+      paths.add(surface.path);
     }
   }
   const entries = Object.entries(config.principals);
@@ -410,14 +438,19 @@ export class TrustedIdentityVerifier {
       if (input.now < payload.nbf) fail("NOT_YET_VALID", "trusted assertion is not yet valid");
       if (input.now >= payload.exp) fail("EXPIRED", "trusted assertion has expired");
       if (payload.transport !== input.observation.transport || !this.config.transports.includes(payload.transport)) fail("UNTRUSTED_TRANSPORT", "asserted transport is not allowed");
-      const verifier = this.verifiers[payload.transport];
-      if (!verifier) fail("TRANSPORT_VERIFIER_MISSING", "no server-side verifier is configured");
       let transport: TransportEvidence;
-      try {
-        transport = verifier.verify(input.observation);
-      } catch (error) {
-        if (error instanceof TrustedAccessError) throw error;
-        fail("UNTRUSTED_TRANSPORT", "trusted transport verification failed");
+      if (input.observation.handoff !== undefined) {
+        if (input.observation.handoff !== "trusted-ingress" || this.config.handoff?.enabled !== true) fail("UNTRUSTED_TRANSPORT", "trusted ingress handoff is not enabled");
+        transport = { transport: input.observation.transport, peerAddress: input.observation.peerAddress ?? "trusted-ingress", peerIdentity: payload.peer_identity };
+      } else {
+        const verifier = this.verifiers[payload.transport];
+        if (!verifier) fail("TRANSPORT_VERIFIER_MISSING", "no server-side verifier is configured");
+        try {
+          transport = verifier.verify(input.observation);
+        } catch (error) {
+          if (error instanceof TrustedAccessError) throw error;
+          fail("UNTRUSTED_TRANSPORT", "trusted transport verification failed");
+        }
       }
       if (payload.peer_identity !== undefined && payload.peer_identity !== transport.peerIdentity) fail("UNTRUSTED_TRANSPORT", "current transport proof does not match assertion");
       const key = this.registry.keys.find((item) => item.key_id === payload!.kid);
@@ -447,6 +480,30 @@ export class TrustedIdentityVerifier {
       auditTrustedAccess(this.auditSink, "REJECTED", wrapped.code, payload, "trusted_dev.verify");
       throw wrapped;
     }
+  }
+
+  verifyHandoff(assertion: string, now: number): TrustedIdentityPayload {
+    const payload = parseTrustedIdentityAssertion(assertion).payload;
+    return this.verify(assertion, { observation: { transport: payload.transport, handoff: "trusted-ingress" }, now });
+  }
+
+  verifyHandoffPrincipal(assertion: string, now: number): import("./application.js").AgentctlPrincipal {
+    const payload = this.verifyHandoff(assertion, now);
+    return {
+      issuer: payload.iss,
+      subject: payload.sub,
+      principalType: payload.principal_type,
+      scopes: [...payload.scopes],
+      audience: payload.aud,
+      environment: payload.environment,
+      authMethod: "trusted_dev",
+      transport: payload.transport,
+      assertionId: payload.jti,
+      hasScope: (scope) => payload.scopes.includes(scope),
+      requireScope: (scope) => {
+        if (!payload.scopes.includes(scope)) fail("SCOPE_DENIED", "application scope is not granted to the trusted principal");
+      },
+    };
   }
 
   verifyPrincipal(assertion: string, input: { observation: TransportObservation; now: number }): import("./application.js").AgentctlPrincipal {

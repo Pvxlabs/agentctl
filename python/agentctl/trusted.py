@@ -186,6 +186,67 @@ class TrustedOnboardingConfig:
 
 
 @dataclass(frozen=True)
+class TrustedHandoffConfig:
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
+class TrustedIngressSurface:
+    path: str
+    principal: str
+    audience: str
+    scopes: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.path, str) or not self.path.startswith("/") or "?" in self.path or "#" in self.path:
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress surface path must be an absolute path without query or fragment")
+        _identifier(self.principal, "trusted ingress surface principal")
+        _identifier(self.audience, "trusted ingress surface audience")
+        if not self.scopes or len(set(self.scopes)) != len(self.scopes):
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress surface scopes must be non-empty and unique")
+        for scope in self.scopes:
+            _identifier(scope, "trusted ingress surface scope")
+
+
+@dataclass(frozen=True)
+class TrustedIngressConfig:
+    mode: str
+    bind: str
+    port: int
+    upstream: str
+    endpoint: str
+    surfaces: Mapping[str, TrustedIngressSurface]
+
+    def __post_init__(self) -> None:
+        if self.mode != "session_bootstrap":
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress mode must be session_bootstrap")
+        if not isinstance(self.bind, str) or not self.bind.strip():
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress bind must be a non-empty string")
+        try:
+            address = ipaddress.ip_address(self.bind)
+        except ValueError:
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress bind must be an IP address")
+        if address.is_unspecified or not (address.is_loopback or address in ipaddress.ip_network("100.64.0.0/10") or address in ipaddress.ip_network("fd7a:115c:a1e0::/48")):
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress bind must be loopback or an explicit Tailscale address")
+        if isinstance(self.port, bool) or not isinstance(self.port, int) or not 1 <= self.port <= 65535:
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress port must be between 1 and 65535")
+        if not isinstance(self.upstream, str) or not self.upstream.startswith(("http://", "https://")):
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress upstream must be an HTTP(S) URL")
+        if not isinstance(self.endpoint, str) or not self.endpoint.startswith("/") or "?" in self.endpoint or "#" in self.endpoint:
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress endpoint must be an absolute path without query or fragment")
+        if not isinstance(self.surfaces, Mapping) or not self.surfaces:
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress surfaces must be a non-empty object")
+        paths: set[str] = set()
+        for name, surface in self.surfaces.items():
+            _identifier(name, "trusted ingress surface name")
+            if not isinstance(surface, TrustedIngressSurface):
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress surface is malformed")
+            if surface.path in paths:
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress surface paths must be unique")
+            paths.add(surface.path)
+
+
+@dataclass(frozen=True)
 class TrustedAccessConfig:
     enabled: bool = False
     environment: str | None = None
@@ -195,6 +256,8 @@ class TrustedAccessConfig:
     adapter: TrustedAdapterConfig | None = None
     dev_profile: Mapping[str, DevIdentityProfile] | None = None
     onboarding: TrustedOnboardingConfig | None = None
+    handoff: TrustedHandoffConfig | None = None
+    ingress: TrustedIngressConfig | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -221,6 +284,12 @@ class TrustedAccessConfig:
                     _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted dev profile entry is malformed")
         if self.onboarding is not None and not isinstance(self.onboarding, TrustedOnboardingConfig):
             _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted onboarding metadata is malformed")
+        if self.handoff is not None and not isinstance(self.handoff, TrustedHandoffConfig):
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted handoff metadata is malformed")
+        if self.ingress is not None and not isinstance(self.ingress, TrustedIngressConfig):
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress metadata is malformed")
+        if self.ingress is not None and (self.handoff is None or not self.handoff.enabled):
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress requires handoff.enabled")
         values = self.principals or {}
         identities: set[tuple[str, str]] = set()
         for name, policy in values.items():
@@ -350,10 +419,39 @@ class TrustedAccessConfig:
                 restart=command_config(raw_onboarding.get("restart"), "onboarding.restart"),
                 smoke=command_config(raw_onboarding.get("smoke"), "onboarding.smoke"),
             )
-        unknown = set(value) - {"enabled", "environment", "transports", "principals", "application", "adapter", "dev_profile", "onboarding"}
+        raw_handoff = value.get("handoff")
+        handoff = None
+        if raw_handoff is not None:
+            if not isinstance(raw_handoff, Mapping) or set(raw_handoff) != {"enabled"} or not isinstance(raw_handoff["enabled"], bool):
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted_access.handoff must contain boolean enabled")
+            handoff = TrustedHandoffConfig(raw_handoff["enabled"])
+
+        raw_ingress = value.get("ingress")
+        ingress = None
+        if raw_ingress is not None:
+            if not isinstance(raw_ingress, Mapping):
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted_access.ingress must be an object")
+            unknown_ingress = set(raw_ingress) - {"mode", "bind", "port", "upstream", "endpoint", "surfaces"}
+            if unknown_ingress:
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", f"unknown trusted ingress fields: {sorted(unknown_ingress)}")
+            raw_surfaces = raw_ingress.get("surfaces")
+            if not isinstance(raw_surfaces, Mapping):
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress surfaces must be an object")
+            surfaces: dict[str, TrustedIngressSurface] = {}
+            for name, raw_surface in raw_surfaces.items():
+                if not isinstance(name, str) or not isinstance(raw_surface, Mapping):
+                    _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted ingress surface is malformed")
+                if set(raw_surface) - {"path", "principal", "audience", "scopes"}:
+                    _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", f"unknown trusted ingress surface fields: {sorted(set(raw_surface) - {'path', 'principal', 'audience', 'scopes'})}")
+                raw_scopes = raw_surface.get("scopes")
+                if not isinstance(raw_scopes, list) or not all(isinstance(scope, str) for scope in raw_scopes):
+                    _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", f"trusted ingress surface {name} scopes must be a list")
+                surfaces[name] = TrustedIngressSurface(raw_surface.get("path"), raw_surface.get("principal"), raw_surface.get("audience"), tuple(raw_scopes))
+            ingress = TrustedIngressConfig(raw_ingress.get("mode"), raw_ingress.get("bind"), raw_ingress.get("port"), raw_ingress.get("upstream"), raw_ingress.get("endpoint"), surfaces)
+        unknown = set(value) - {"enabled", "environment", "transports", "principals", "application", "adapter", "dev_profile", "onboarding", "handoff", "ingress"}
         if unknown:
             _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", f"unknown trusted_access fields: {sorted(unknown)}")
-        return cls(enabled, environment, tuple(raw_transports), principals, application, adapter, dev_profile, onboarding)
+        return cls(enabled, environment, tuple(raw_transports), principals, application, adapter, dev_profile, onboarding, handoff, ingress)
 
     def policy_for(self, name: str) -> TrustedPrincipalPolicy:
         if not self.enabled:
@@ -372,6 +470,7 @@ class TransportObservation:
     transport: str
     peer_address: str | None
     forwarded_headers_present: bool = False
+    handoff: str | None = None
 
 
 @dataclass(frozen=True)
@@ -991,16 +1090,25 @@ class TrustedIdentityVerifier:
                 _fail("EXPIRED", "trusted assertion has expired")
             if payload["transport"] not in self.config.transports or observation.transport != payload["transport"]:
                 _fail("UNTRUSTED_TRANSPORT", "asserted transport is not allowed for this request")
-            verifier = self.transport_verifiers.get(observation.transport)
-            if verifier is None or verifier.transport != observation.transport:
-                _fail("TRANSPORT_VERIFIER_MISSING", "no server-side verifier is configured for transport")
-            try:
-                transport = verifier.verify(observation)
-            except TrustedAccessError:
-                raise
-            except Exception as exc:
-                _fail("UNTRUSTED_TRANSPORT", "trusted transport verification failed")
-                raise AssertionError from exc
+            if observation.handoff is not None:
+                if observation.handoff != "trusted-ingress" or self.config.handoff is None or not self.config.handoff.enabled:
+                    _fail("UNTRUSTED_TRANSPORT", "trusted ingress handoff is not enabled")
+                transport = TransportEvidence(
+                    observation.transport,
+                    observation.peer_address or "trusted-ingress",
+                    payload.get("peer_identity"),
+                )
+            else:
+                verifier = self.transport_verifiers.get(observation.transport)
+                if verifier is None or verifier.transport != observation.transport:
+                    _fail("TRANSPORT_VERIFIER_MISSING", "no server-side verifier is configured for transport")
+                try:
+                    transport = verifier.verify(observation)
+                except TrustedAccessError:
+                    raise
+                except Exception as exc:
+                    _fail("UNTRUSTED_TRANSPORT", "trusted transport verification failed")
+                    raise AssertionError from exc
             if payload.get("peer_identity") is not None and payload["peer_identity"] != transport.peer_identity:
                 _fail("UNTRUSTED_TRANSPORT", "current Tailscale peer does not match assertion")
             key = self.registry.keys.get(payload["kid"])
@@ -1042,6 +1150,15 @@ class TrustedIdentityVerifier:
         """Verify once and return the application-facing principal contract."""
 
         return self.verify(assertion, observation=observation, now=now, action=action).to_principal()
+
+    def verify_handoff(self, assertion: str, *, now: int, action: str = "trusted_dev.handoff") -> TrustedIdentityEvidence:
+        payload, _signature, _segment = parse_trusted_identity_assertion(assertion)
+        return self.verify(
+            assertion,
+            observation=TransportObservation(payload["transport"], None, handoff="trusted-ingress"),
+            now=now,
+            action=action,
+        )
 
 
 class ApplicationPrincipalResolver(Protocol):

@@ -60,8 +60,8 @@ agentctl skill install --update
 For a consumer project, the manual fallback is:
 
 ```bash
-agentctl trusted-access onboard --path . --plan
-agentctl trusted-access onboard --path .
+agentctl trusted-access onboard --plan
+agentctl trusted-access onboard
 ```
 
 See [docs/distribution.md](docs/distribution.md) for the release contract and

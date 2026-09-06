@@ -123,6 +123,49 @@ def test_agent_identity_can_request_only_explicit_scopes_and_is_replay_protected
     assert raised.value.code == "SCOPE_DENIED"
 
 
+def test_handoff_requires_explicit_config_and_preserves_signed_peer_identity() -> None:
+    identity, registry, _ = setup()
+    transport = TailscaleTransportVerifier(lambda _address: "node:dev-host")
+    config = TrustedAccessConfig.from_mapping({
+        "enabled": True,
+        "environment": "dev",
+        "transports": ["tailscale"],
+        "handoff": {"enabled": True},
+        "principals": {"agent": {"subject": "dev-agent", "type": "agent", "scopes": ["app:read"]}},
+    })
+    authority = TrustedAccessAuthority(identity, registry, config, transport_verifiers={"tailscale": transport})
+    verifier = TrustedIdentityVerifier(registry, config, MemoryReplayStore(), expected_audience="orion-dev")
+    assertion = authority.issue(
+        requested_principal="agent",
+        audience="orion-dev",
+        scopes=["app:read"],
+        observation=TransportObservation("tailscale", "100.90.1.2"),
+        now=1_700_000_000,
+    )
+    evidence = verifier.verify_handoff(assertion, now=1_700_000_001)
+    assert evidence.subject == "dev-agent"
+    with pytest.raises(TrustedAccessError) as raised:
+        verifier.verify_handoff(assertion, now=1_700_000_001)
+    assert raised.value.code == "REPLAYED_JTI"
+
+    disabled_config = TrustedAccessConfig.from_mapping({
+        "enabled": True,
+        "environment": "dev",
+        "transports": ["localhost"],
+        "principals": {"agent": {"subject": "dev-agent", "type": "agent", "scopes": ["app:read"]}},
+    })
+    disabled_verifier = TrustedIdentityVerifier(
+        registry,
+        disabled_config,
+        MemoryReplayStore(),
+        expected_audience="orion-dev",
+        transport_verifiers={"localhost": LocalhostTransportVerifier()},
+    )
+    with pytest.raises(TrustedAccessError) as raised:
+        disabled_verifier.verify_handoff(assertion, now=1_700_000_001)
+    assert raised.value.code == "UNTRUSTED_TRANSPORT"
+
+
 @pytest.mark.parametrize(
     "value",
     [
