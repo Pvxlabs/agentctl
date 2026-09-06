@@ -38,6 +38,35 @@ conformance tests.
 
 ## Quick start
 
+For AI-assisted development, the recommended first path is simply to ask the
+coding agent:
+
+```text
+Integrate agentctl Trusted Access into this project.
+```
+
+The agent can install the pinned public release, install its canonical Skill,
+inspect the project, and run the public onboarding workflow. No GitHub URL,
+commit SHA, manifest schema, or DEV password is required from the user.
+
+The canonical user-local install path is:
+
+```bash
+python3 -m pip install --user "git+https://github.com/Pvxlabs/agentctl.git@v0.1.1"
+agentctl --version
+agentctl skill install --update
+```
+
+For a consumer project, the manual fallback is:
+
+```bash
+agentctl trusted-access onboard --path . --plan
+agentctl trusted-access onboard --path .
+```
+
+See [docs/distribution.md](docs/distribution.md) for the release contract and
+compatibility behavior.
+
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
@@ -91,7 +120,8 @@ not implement a secret manager.
   runnable Trusted Access FastAPI/Express references.
 - `python/agentctl/trusted.py`: Trusted Development Access authority,
   transport proofs, signed identity assertions, and application adapter hook.
-- `skill/SKILL.md`: instructions for coding and deployment agents.
+- `skills/agentctl/SKILL.md`: canonical instructions for Trusted Access onboarding agents.
+- `skill/SKILL.md`: legacy compatibility pointer to the canonical Skill.
 - `docs/`: research notes and threat model.
 - `tests/`: protocol, security, and parity tests.
 

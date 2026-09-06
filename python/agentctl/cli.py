@@ -37,6 +37,7 @@ from .trusted import (
 )
 from .verifier import VerificationError, Verifier
 from .onboarding import OnboardingError, build_onboarding_plan, format_onboarding, onboard
+from .distribution import install_skill, read_skill_status, version_contract
 
 
 def _json(value: Any) -> str:
@@ -50,6 +51,17 @@ def _emit(value: Any, *, json_output: bool = False) -> None:
         sys.stdout.write(value + ("" if value.endswith("\n") else "\n"))
     else:
         sys.stdout.write(_json(value))
+
+
+def _cmd_skill(args: argparse.Namespace) -> int:
+    if args.skill_action == "status":
+        result = read_skill_status()
+    elif args.skill_action == "install":
+        result = install_skill(update=args.update)
+    else:
+        raise ValueError("skill subcommand is required")
+    _emit(result, json_output=True)
+    return 0 if result.get("installed", True) and result.get("compatible", True) and result.get("content_matches_metadata", True) else 1
 
 
 def _read_body(args: argparse.Namespace) -> bytes:
@@ -732,7 +744,22 @@ def _cmd_audit(args: argparse.Namespace) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentctl", description="Request-bound machine authorization for AI agents")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=(
+            "agentctl {installed_version} (trusted-access-onboarding "
+            "{trusted_access_onboarding_version}; skill-min-agentctl "
+            "{agentctl_min_version})"
+        ).format(**version_contract()),
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    skill = subparsers.add_parser("skill", help="install and inspect the canonical agentctl Codex Skill")
+    skill_sub = skill.add_subparsers(dest="skill_action", required=True)
+    skill_install = skill_sub.add_parser("install", help="install the pinned Skill into the user Codex directory")
+    skill_install.add_argument("--update", action="store_true")
+    skill_sub.add_parser("status", help="show installed Skill and version binding")
 
     identity = subparsers.add_parser("identity")
     identity_sub = identity.add_subparsers(dest="identity_action", required=True)
@@ -924,7 +951,9 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_call(args)
         if args.command == "audit":
             return _cmd_audit(args)
-    except (OSError, ValueError, TypeError) as exc:
+        if args.command == "skill":
+            return _cmd_skill(args)
+    except (OSError, RuntimeError, ValueError, TypeError) as exc:
         _emit({"result": "FAILED", "result_code": getattr(exc, "code", "CLI_ERROR"), "message": str(exc)}, json_output=True)
         return 2
     return 2

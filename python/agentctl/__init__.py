@@ -1,6 +1,6 @@
 """agentctl protocol and verifier package."""
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __protocol_version__ = "agent-action-assertion/v1"
 
 from .protocol import (  # noqa: F401
