@@ -50,6 +50,7 @@ from .application import (  # noqa: F401
     ApplicationAuthentication,
     ApplicationAuthorizationError,
     CustomApplicationAdapter,
+    DevIdentityBootstrapAdapter,
     DeclarativeMappingAdapter,
     MappedApplicationPrincipal,
     TrustedAccessSDK,
@@ -62,4 +63,12 @@ from .runtime import (  # noqa: F401
     TrustedAccessRuntime,
     TrustedAccessRuntimePaths,
     default_runtime_dir,
+)
+from .onboarding import (  # noqa: F401
+    DEFAULT_DEV_PROFILE,
+    DevIdentityProfile,
+    OnboardingError,
+    build_onboarding_plan,
+    format_onboarding,
+    onboard,
 )

@@ -261,6 +261,55 @@ trusted-access conformance
 All commands emit machine-readable JSON. Configuration errors use exit code 2;
 failed security tests and conformance use exit code 1.
 
+## Consumer onboarding
+
+Use the onboarding command to lower the cost of adding Trusted Access to a new
+DEV application while keeping the existing authority, verifier, replay, audit,
+and application adapter boundaries:
+
+```bash
+agentctl trusted-access onboard --path . --plan
+agentctl trusted-access onboard --path .
+```
+
+`--plan` is read-only. It detects the project framework, reports existing
+integration and candidate files, and shows the manifest/profile that would be
+created; it does not write files or execute commands. The execution form may
+write a new manifest atomically, bootstrap or reuse the canonical runtime, and
+run the configured checks.
+
+Onboarding never executes a discovered filename. Application startup, restart,
+identity bootstrap, and smoke commands run only when they are explicitly
+declared under `trusted_access.onboarding`, as argv arrays with `shell=False`.
+An already healthy DEV application is reused. No daemon, supervisor, proxy, or
+reverse proxy is created.
+
+Identity lifecycle remains application-owned. A consumer may declare either an
+adapter module or a command contract. An adapter owns its DEV datastore and
+must implement `inspect_identity`, `ensure_identity`, `validate_role`, and
+`validate_active`. A command bootstrap must return a verified JSON status:
+
+```json
+{
+  "identities": {
+    "user@test.local": {"active": true, "role": "user"},
+    "admin@test.local": {"active": true, "role": "admin"}
+  }
+}
+```
+
+The command form is useful for an existing project bootstrap script; the
+adapter form is useful when the application already exposes a typed identity
+lifecycle API. They are mutually exclusive, and missing contracts fail
+closed. The fallback password value may be passed to an application adapter
+for DEV account creation, but credentials are never part of an assertion or
+the canonical Trusted Access authentication path.
+
+Onboarding metadata is not part of ATIP and does not change application
+authorization. The application still maps `dev-user`, `dev-admin`, and
+`dev-agent` to its own accounts, creates its ordinary session, and enforces
+roles, scopes, CSRF, and domain permissions.
+
 ## P620 and internal tooling
 
 P620 Performance Console, DEV Portal, and similar observability pages may stay

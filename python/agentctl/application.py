@@ -31,6 +31,27 @@ class ApplicationAuthorizationError(ValueError):
         self.message = message
 
 
+class DevIdentityBootstrapAdapter(Protocol):
+    """Application-owned DEV identity lifecycle used by onboarding.
+
+    Implementations must only operate on a DEV datastore.  agentctl calls
+    these methods to inspect and repair mapped accounts, but never accesses an
+    application's database directly.
+    """
+
+    def inspect_identity(self, account: str) -> Mapping[str, Any] | None:
+        """Return account state, or ``None`` when the account does not exist."""
+
+    def ensure_identity(self, account: str, role: str, *, active: bool = True, fallback_password: str = "000000") -> Any:
+        """Create or reuse the account idempotently in DEV."""
+
+    def validate_role(self, account: str, role: str) -> bool:
+        """Return whether the existing account has the expected role."""
+
+    def validate_active(self, account: str) -> bool:
+        """Return whether the existing account is active."""
+
+
 @dataclass(frozen=True)
 class MappedApplicationPrincipal:
     """Reference result for the declarative mapping adapter.

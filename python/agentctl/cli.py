@@ -36,6 +36,7 @@ from .trusted import (
     parse_trusted_identity_assertion,
 )
 from .verifier import VerificationError, Verifier
+from .onboarding import OnboardingError, build_onboarding_plan, format_onboarding, onboard
 
 
 def _json(value: Any) -> str:
@@ -370,6 +371,31 @@ manifest. See `docs/trusted-access.md` for framework examples.
         encoding="utf-8",
     )
     _emit({"result": "CREATED", "framework": framework, "manifest": str(manifest_path), "identity_file": str(identity_path), "registry_file": str(registry_path), "integration_guide": str(guide), "state_created": created_state}, json_output=True)
+    return 0
+
+
+def _cmd_trusted_access_onboard(args: argparse.Namespace) -> int:
+    """Run the consumer onboarding workflow without exposing internals."""
+
+    try:
+        result = build_onboarding_plan(args.path).to_dict() if args.plan else onboard(args.path, runtime_dir=args.runtime_dir, plan=False)
+    except OnboardingError as exc:
+        try:
+            plan = build_onboarding_plan(args.path)
+            plan["ready"] = False
+            plan["blocker"] = {"code": exc.code, "message": exc.message}
+            result = plan
+        except Exception:
+            result = {"ready": False, "project": {"root": str(Path(args.path).resolve())}, "blocker": {"code": exc.code, "message": exc.message}}
+        if args.json_output:
+            _emit(result, json_output=True)
+        else:
+            _emit(format_onboarding(result))
+        return 1
+    if args.json_output:
+        _emit(result, json_output=True)
+    else:
+        _emit(format_onboarding(result))
     return 0
 
 
@@ -742,6 +768,11 @@ def _parser() -> argparse.ArgumentParser:
     trusted_access_init = trusted_access_sub.add_parser("init")
     trusted_access_init.add_argument("--path", default=".")
     trusted_access_init.add_argument("--force", action="store_true")
+    trusted_access_onboard = trusted_access_sub.add_parser("onboard")
+    trusted_access_onboard.add_argument("--path", default=".")
+    trusted_access_onboard.add_argument("--runtime-dir")
+    trusted_access_onboard.add_argument("--plan", action="store_true")
+    trusted_access_onboard.add_argument("--json", dest="json_output", action="store_true")
     trusted_access_doctor = trusted_access_sub.add_parser("doctor")
     trusted_access_doctor.add_argument("--manifest")
     trusted_access_doctor.add_argument("--identity-file")
@@ -866,6 +897,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _cmd_trusted_access(args)
             if args.trusted_access_action == "init":
                 return _cmd_trusted_access_init(args)
+            if args.trusted_access_action == "onboard":
+                return _cmd_trusted_access_onboard(args)
             if args.trusted_access_action == "doctor":
                 return _cmd_trusted_access_doctor(args)
             if args.trusted_access_action == "bootstrap":

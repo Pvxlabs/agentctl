@@ -34,6 +34,18 @@ export interface TrustedAccessConfig {
   principals: Record<string, TrustedPrincipalPolicy>;
   application?: { identity: string; audience?: string };
   adapter?: { type: "declarative_mapping" | "custom"; mappings?: Record<string, string> };
+  /** Onboarding metadata is consumer-owned and has no ATIP wire semantics. */
+  dev_profile?: Record<string, { principal: string; account: string; role: string }>;
+  onboarding?: {
+    identity_bootstrap?: {
+      type: "command" | "adapter";
+      command?: string[];
+      module?: string;
+    };
+    start?: { command: string[] };
+    restart?: { command: string[] };
+    smoke?: { command: string[] };
+  };
 }
 
 export interface TransportObservation {
@@ -101,7 +113,7 @@ function validateTrustedPrincipalPolicy(name: string, value: unknown): TrustedPr
 
 export function validateTrustedAccessConfig(config: TrustedAccessConfig): TrustedAccessConfig {
   if (typeof config !== "object" || config === null || Array.isArray(config)) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted access config must be an object");
-  const unknown = Object.keys(config).filter((key) => !new Set(["enabled", "environment", "transports", "principals", "application", "adapter"]).has(key));
+  const unknown = Object.keys(config).filter((key) => !new Set(["enabled", "environment", "transports", "principals", "application", "adapter", "dev_profile", "onboarding"]).has(key));
   if (unknown.length) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", `unknown trusted_access fields: ${unknown.join(", ")}`);
   if (typeof config.enabled !== "boolean") fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted_access.enabled must be boolean");
   if (config.environment !== undefined) identifier(config.environment, "trusted_access.environment");
@@ -132,6 +144,43 @@ export function validateTrustedAccessConfig(config: TrustedAccessConfig): Truste
       if (typeof applicationIdentity !== "string" || applicationIdentity.trim() !== applicationIdentity || applicationIdentity.length === 0) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted adapter application identity must be a trimmed string");
     }
     if (config.adapter.type === "declarative_mapping" && Object.keys(mappings).length === 0) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "declarative mapping adapter requires mappings");
+  }
+  if (config.dev_profile !== undefined) {
+    if (config.dev_profile === null || typeof config.dev_profile !== "object" || Array.isArray(config.dev_profile)) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted_access.dev_profile must be an object");
+    for (const [name, profile] of Object.entries(config.dev_profile)) {
+      if (name.trim() !== name || name.length === 0 || profile === null || typeof profile !== "object" || Array.isArray(profile)) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted dev profile entry is malformed");
+      const unknownProfile = Object.keys(profile).filter((key) => !new Set(["principal", "account", "role"]).has(key));
+      if (unknownProfile.length) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", `unknown trusted dev profile fields: ${unknownProfile.join(", ")}`);
+      identifier(profile.principal, "trusted_access.dev_profile.principal");
+      if (typeof profile.account !== "string" || profile.account.trim() !== profile.account || profile.account.length === 0) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted_access.dev_profile.account must be a trimmed string");
+      identifier(profile.role, "trusted_access.dev_profile.role");
+    }
+  }
+  if (config.onboarding !== undefined) {
+    if (config.onboarding === null || typeof config.onboarding !== "object" || Array.isArray(config.onboarding)) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted_access.onboarding must be an object");
+    const unknownOnboarding = Object.keys(config.onboarding).filter((key) => !new Set(["identity_bootstrap", "start", "restart", "smoke"]).has(key));
+    if (unknownOnboarding.length) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", `unknown trusted onboarding fields: ${unknownOnboarding.join(", ")}`);
+    const validateCommand = (value: unknown, field: string) => {
+      if (value === undefined) return;
+      if (value === null || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some((key) => key !== "command") || !Array.isArray((value as { command?: unknown }).command) || (value as { command: unknown[] }).command.length === 0 || (value as { command: unknown[] }).command.some((item) => typeof item !== "string" || item.trim().length === 0)) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", `${field}.command must be a non-empty list of strings`);
+    };
+    validateCommand(config.onboarding.start, "onboarding.start");
+    validateCommand(config.onboarding.restart, "onboarding.restart");
+    validateCommand(config.onboarding.smoke, "onboarding.smoke");
+    const bootstrap = config.onboarding.identity_bootstrap;
+    if (bootstrap !== undefined) {
+      if (bootstrap === null || typeof bootstrap !== "object" || Array.isArray(bootstrap)) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "identity_bootstrap must be an object");
+      const unknownBootstrap = Object.keys(bootstrap).filter((key) => !new Set(["type", "command", "module"]).has(key));
+      if (unknownBootstrap.length) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", `unknown identity bootstrap fields: ${unknownBootstrap.join(", ")}`);
+      if (bootstrap.type !== "command" && bootstrap.type !== "adapter") fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "identity bootstrap type must be command or adapter");
+      if (bootstrap.type === "command") {
+        validateCommand({ command: bootstrap.command }, "identity_bootstrap");
+        if (bootstrap.module !== undefined) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "command identity bootstrap cannot declare module");
+      } else {
+        if (typeof bootstrap.module !== "string" || bootstrap.module.trim().length === 0) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "adapter identity bootstrap requires module");
+        if (bootstrap.command !== undefined) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "adapter identity bootstrap cannot declare command");
+      }
+    }
   }
   const entries = Object.entries(config.principals);
   if (config.enabled && entries.length === 0) fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "at least one trusted principal is required");

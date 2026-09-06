@@ -125,6 +125,67 @@ class TrustedAdapterConfig:
 
 
 @dataclass(frozen=True)
+class DevIdentityProfile:
+    """Application-owned identity mapping used by onboarding only.
+
+    These values are deliberately outside the ATIP wire protocol.  They are
+    onboarding defaults and are consumed by the application bootstrap adapter.
+    """
+
+    principal: str
+    account: str
+    role: str
+
+    def __post_init__(self) -> None:
+        _identifier(self.principal, "trusted_access.dev_profile.principal")
+        if not isinstance(self.account, str) or not self.account.strip() or self.account != self.account.strip():
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted_access.dev_profile.account must be a trimmed string")
+        _identifier(self.role, "trusted_access.dev_profile.role")
+
+
+@dataclass(frozen=True)
+class TrustedCommandConfig:
+    """An explicitly application-owned command allowed by onboarding."""
+
+    command: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.command or any(not isinstance(item, str) or not item.strip() for item in self.command):
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "onboarding command must contain non-empty strings")
+
+
+@dataclass(frozen=True)
+class TrustedIdentityBootstrapConfig:
+    """How a consumer application owns DEV identity creation/inspection."""
+
+    type: str
+    command: TrustedCommandConfig | None = None
+    module: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.type not in {"command", "adapter"}:
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "identity bootstrap type must be command or adapter")
+        if self.type == "command" and self.module is not None:
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "command identity bootstrap cannot declare module")
+        if self.type == "adapter" and self.command is not None:
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "adapter identity bootstrap cannot declare command")
+        if self.type == "command" and self.command is None:
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "command identity bootstrap requires command")
+        if self.type == "adapter" and (not isinstance(self.module, str) or not self.module.strip()):
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "adapter identity bootstrap requires module")
+
+
+@dataclass(frozen=True)
+class TrustedOnboardingConfig:
+    """Optional, explicit consumer onboarding contracts."""
+
+    identity_bootstrap: TrustedIdentityBootstrapConfig | None = None
+    start: TrustedCommandConfig | None = None
+    restart: TrustedCommandConfig | None = None
+    smoke: TrustedCommandConfig | None = None
+
+
+@dataclass(frozen=True)
 class TrustedAccessConfig:
     enabled: bool = False
     environment: str | None = None
@@ -132,6 +193,8 @@ class TrustedAccessConfig:
     principals: Mapping[str, TrustedPrincipalPolicy] | None = None
     application: TrustedApplicationConfig | None = None
     adapter: TrustedAdapterConfig | None = None
+    dev_profile: Mapping[str, DevIdentityProfile] | None = None
+    onboarding: TrustedOnboardingConfig | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -150,6 +213,14 @@ class TrustedAccessConfig:
             _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted application metadata is malformed")
         if self.adapter is not None and not isinstance(self.adapter, TrustedAdapterConfig):
             _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted adapter metadata is malformed")
+        if self.dev_profile is not None:
+            if not isinstance(self.dev_profile, Mapping):
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted dev profile must be a mapping")
+            for name, profile in self.dev_profile.items():
+                if not isinstance(name, str) or not isinstance(profile, DevIdentityProfile):
+                    _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted dev profile entry is malformed")
+        if self.onboarding is not None and not isinstance(self.onboarding, TrustedOnboardingConfig):
+            _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted onboarding metadata is malformed")
         values = self.principals or {}
         identities: set[tuple[str, str]] = set()
         for name, policy in values.items():
@@ -226,10 +297,63 @@ class TrustedAccessConfig:
             if not isinstance(raw_mappings, Mapping):
                 _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted adapter mappings must be an object")
             adapter = TrustedAdapterConfig(raw_adapter.get("type", "custom"), dict(raw_mappings))
-        unknown = set(value) - {"enabled", "environment", "transports", "principals", "application", "adapter"}
+        raw_profile = value.get("dev_profile")
+        dev_profile = None
+        if raw_profile is not None:
+            if not isinstance(raw_profile, Mapping):
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted_access.dev_profile must be an object")
+            dev_profile = {}
+            for name, raw in raw_profile.items():
+                if not isinstance(name, str) or not isinstance(raw, Mapping):
+                    _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted dev profile entry is malformed")
+                unknown_profile = set(raw) - {"principal", "account", "role"}
+                if unknown_profile:
+                    _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", f"unknown trusted dev profile fields: {sorted(unknown_profile)}")
+                dev_profile[name] = DevIdentityProfile(raw.get("principal"), raw.get("account"), raw.get("role"))
+
+        def command_config(raw: Any, field: str) -> TrustedCommandConfig | None:
+            if raw is None:
+                return None
+            if not isinstance(raw, Mapping) or set(raw) != {"command"}:
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", f"{field} must contain only command")
+            command = raw.get("command")
+            if not isinstance(command, list):
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", f"{field}.command must be a list")
+            return TrustedCommandConfig(tuple(command))
+
+        raw_onboarding = value.get("onboarding")
+        onboarding = None
+        if raw_onboarding is not None:
+            if not isinstance(raw_onboarding, Mapping):
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "trusted_access.onboarding must be an object")
+            unknown_onboarding = set(raw_onboarding) - {"identity_bootstrap", "start", "restart", "smoke"}
+            if unknown_onboarding:
+                _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", f"unknown trusted onboarding fields: {sorted(unknown_onboarding)}")
+            raw_bootstrap = raw_onboarding.get("identity_bootstrap")
+            identity_bootstrap = None
+            if raw_bootstrap is not None:
+                if not isinstance(raw_bootstrap, Mapping):
+                    _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "identity_bootstrap must be an object")
+                bootstrap_unknown = set(raw_bootstrap) - {"type", "command", "module"}
+                if bootstrap_unknown:
+                    _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", f"unknown identity bootstrap fields: {sorted(bootstrap_unknown)}")
+                bootstrap_type = raw_bootstrap.get("type")
+                bootstrap_command = command_config({"command": raw_bootstrap.get("command")}, "identity_bootstrap") if "command" in raw_bootstrap else None
+                if bootstrap_type == "command" and "module" in raw_bootstrap:
+                    _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "command identity bootstrap cannot declare module")
+                if bootstrap_type == "adapter" and "command" in raw_bootstrap:
+                    _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", "adapter identity bootstrap cannot declare command")
+                identity_bootstrap = TrustedIdentityBootstrapConfig(bootstrap_type, bootstrap_command, raw_bootstrap.get("module"))
+            onboarding = TrustedOnboardingConfig(
+                identity_bootstrap=identity_bootstrap,
+                start=command_config(raw_onboarding.get("start"), "onboarding.start"),
+                restart=command_config(raw_onboarding.get("restart"), "onboarding.restart"),
+                smoke=command_config(raw_onboarding.get("smoke"), "onboarding.smoke"),
+            )
+        unknown = set(value) - {"enabled", "environment", "transports", "principals", "application", "adapter", "dev_profile", "onboarding"}
         if unknown:
             _fail("INVALID_TRUSTED_ACCESS_CONFIGURATION", f"unknown trusted_access fields: {sorted(unknown)}")
-        return cls(enabled, environment, tuple(raw_transports), principals, application, adapter)
+        return cls(enabled, environment, tuple(raw_transports), principals, application, adapter, dev_profile, onboarding)
 
     def policy_for(self, name: str) -> TrustedPrincipalPolicy:
         if not self.enabled:
